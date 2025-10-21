@@ -177,13 +177,15 @@ async function sendToAI(msg) {
       body: JSON.stringify(body)
     });
     const data = await r.json();
-    const reply = data?.choices?.[0]?.message?.content;
+    const reply = data?.choices?.[0]?.message?.content || '';
     if (!reply) return;
     try {
       const cmd = JSON.parse(reply);
-      handleAICommand(cmd);
+      if (cmd && typeof cmd === 'object') handleAICommand(cmd);
     } catch {
-      speak(reply);
+      if (/^\s*[{[]/.test(reply)) return; // never read JSON aloud
+      const clean = String(reply).replace(/json|\{|\}|"|`/gi, '').slice(0, 200);
+      if (clean.trim()) speak(clean.trim());
     }
   } catch (e) {
     console.error(e);
@@ -265,15 +267,17 @@ if (recognition) {
   recognition.interimResults = false;
   recognition.continuous = false; // manual restart for reliability
 
+  let backoff = 250;
   recognition.onresult = (e) => {
     const transcript = e.results[0][0].transcript;
     console.log("Heard:", transcript);
     const handled = tryHandleLocally(transcript);
     if (!handled) sendToAI(transcript);
+    backoff = 250;
   };
   recognition.onend = () => {
     setListening(false);
-    if (alwaysListening) setTimeout(() => { tryStartRecognition(); }, 250);
+    if (alwaysListening) setTimeout(() => { tryStartRecognition(); backoff = Math.min(backoff * 2, 2000); }, backoff);
   };
   recognition.onerror = () => setListening(false);
 }

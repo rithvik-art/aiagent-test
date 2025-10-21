@@ -172,13 +172,20 @@ async function sendToAI(msg) {
       body: JSON.stringify(body)
     });
     const data = await r.json();
-    const reply = data?.choices?.[0]?.message?.content;
+    const reply = data?.choices?.[0]?.message?.content || '';
     if (!reply) return;
+    // Never speak raw JSON. Parse strictly, otherwise ask for clarification.
     try {
       const cmd = JSON.parse(reply);
-      handleAICommand(cmd);
+      if (cmd && typeof cmd === 'object') handleAICommand(cmd);
     } catch {
-      speak(reply);
+      // If a function returns text by mistake, keep it short and never mention JSON.
+      if (/^\s*[{[]/.test(reply)) {
+        // Looks like JSON but failed to parse: ignore speech to avoid reading braces aloud.
+        return;
+      }
+      const clean = String(reply).replace(/json|\{|\}|"|`/gi, '').slice(0, 200);
+      if (clean.trim()) speak(clean.trim());
     }
   } catch (e) {
     console.error(e);
@@ -232,12 +239,14 @@ if (recognition) {
   recognition.lang = "en-IN";
   recognition.interimResults = false;
   recognition.continuous = false;
+  let backoff = 250;
   recognition.onresult = (e) => {
     const transcript = e.results[0][0].transcript;
     const handled = tryHandleLocally(transcript);
     if (!handled) sendToAI(transcript);
+    backoff = 250; // reset backoff after a successful result
   };
-  recognition.onend = () => { setListening(false); if (alwaysListening) setTimeout(() => { tryStartRecognition(); }, 250); };
+  recognition.onend = () => { setListening(false); if (alwaysListening) setTimeout(() => { tryStartRecognition(); backoff = Math.min(backoff * 2, 2000); }, backoff); };
   recognition.onerror = () => setListening(false);
 }
 
@@ -292,4 +301,3 @@ loadZoneTexture('living_room')
 
 // Hide voice controls if recognition unsupported
 if (!recognition) { toggleBtn.style.display = 'none'; pttBtn.style.display = 'none'; micDot.style.display = 'none'; }
-
