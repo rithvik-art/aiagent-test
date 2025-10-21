@@ -1,0 +1,403 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover" />
+    <title>VR Tour</title>
+    <link rel="icon" href="data:," />
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700&display=swap" rel="stylesheet"/>
+
+    <style>
+      :root{ --ink:#E7ECFF; --bg:#0A0B14; --panel:#101226; --panel-2:#0f1424; --brd:#20233B; --brand-indigo:#1B1756; --brand-yellow:#F3C400; --blur:4px; }
+      html,body{height:100%;margin:0;background:var(--bg);color:var(--ink);font-family:Inter,ui-sans-serif,-apple-system,"Segoe UI",Roboto; overscroll-behavior:none; -webkit-text-size-adjust:100%}
+      #renderCanvas{width:100dvw;height:100dvh;display:block;touch-action:none;background:#000}
+
+      /* make the hidden attribute authoritative across browsers */
+      [hidden]{ display:none !important; }
+
+      /* Viewer must never see HUD/minimap/mirror */
+      body[data-role="viewer"] #bottomBar,
+      body[data-role="viewer"] .mini-wrap,
+      body[data-role="viewer"] #mirrorHud{ display:none !important; }
+
+      button,.btn,.btn-circle,.select-btn{-webkit-tap-highlight-color:transparent;user-select:none}
+      #bottomBar,.btn-circle{touch-action:none; -webkit-user-select:none; -webkit-touch-callout:none}
+
+      #brandLogo{position:fixed;z-index:41;top:max(12px,env(safe-area-inset-top));left:max(12px,env(safe-area-inset-left));
+        padding:8px 10px;border-radius:12px;background:rgba(0,0,0,.22);backdrop-filter:blur(var(--blur));pointer-events:none}
+      #brandLogo img{height:58px}
+
+      .mini-wrap{
+        position:fixed!important;z-index:38!important;
+        top:max(12px,env(safe-area-inset-top))!important;
+        right:max(12px,env(safe-area-inset-right))!important;
+        left:auto!important;
+      }
+      .mini-hidden .mini-wrap{display:none!important}
+
+      #bottomBar{position:fixed;z-index:40;left:max(12px,env(safe-area-inset-left));bottom:max(12px,env(safe-area-inset-bottom));
+        display:flex;gap:10px;align-items:center;flex-wrap:wrap;background:rgba(16,18,38,.55);border:1px solid rgba(32,35,59,.55);
+        border-radius:14px;padding:8px 10px;backdrop-filter:blur(var(--blur))}
+
+      .select{position:relative}
+      .select-btn{display:flex;align-items:center;justify-content:space-between;gap:10px;min-width:180px;padding:10px 12px;padding-right:40px;
+        background:var(--panel-2);color:var(--ink);border:1px solid var(--brd);border-radius:12px;font-size:14px;line-height:1.1;cursor:pointer;position:relative}
+      .select-btn svg{position:absolute;right:12px;transition:transform .18s ease}
+      .select[data-open="true"] .select-btn svg{transform:rotate(180deg)}
+      .select-list{position:absolute;bottom:calc(100% + 8px);left:0;right:0;list-style:none;margin:0;padding:6px 0;display:none;z-index:50;
+        background:var(--panel-2);border:1px solid var(--brand-yellow);border-radius:12px;box-shadow:0 10px 24px rgba(0,0,0,.35);max-height:40vh;overflow:auto}
+      .select.drop-down .select-list{top:calc(100% + 8px);bottom:auto}
+      .select[data-open="true"] .select-list{display:block}
+      .select-list li{padding:12px 14px;font-size:14px;cursor:pointer;color:var(--ink)}
+      .select-list li:hover,.select-list li.active{background:var(--brand-yellow);color:#1a1a1a}
+      #expSelectLive,#expSelect{display:none}
+
+      #dpad{display:grid;gap:6px;grid-template-areas:
+        ". up ."
+        "left . right"
+        ". down .";
+        grid-template-columns:36px 36px 36px;grid-template-rows:36px 36px 36px}
+      .btn-circle{width:36px;height:36px;border:1px solid rgba(32,35,59,.55);border-radius:10px;cursor:pointer;
+        background:rgba(27,23,86,.65);color:var(--brand-yellow);display:grid;place-items:center;transition:transform .05s ease;font-size:16px}
+      .btn-circle:active{transform:translateY(1px)}
+      #btnUp{grid-area:up}#btnDown{grid-area:down}#btnLeft{grid-area:left}#btnRight{grid-area:right}
+      #zoomWrap{display:flex;flex-direction:column;gap:6px;margin-left:2px}
+
+      #roleGate{position:fixed;inset:0;z-index:9999;display:grid;place-items:center;background:radial-gradient(1000px 600px at 50% 30%,#13152A,#070812);
+        padding:max(16px,env(safe-area-inset-top)) max(16px,env(safe-area-inset-right)) max(16px,env(safe-area-inset-bottom)) max(16px,env(safe-area-inset-left))}
+      .gate-card{width:clamp(340px,44vw,680px);padding:22px;border-radius:16px;background:rgba(16,18,38,.86);color:var(--ink);
+        border:1px solid rgba(32,35,59,.9);box-shadow:0 10px 40px rgba(0,0,0,.45)}
+      .gate-row{display:grid;grid-template-columns:1fr minmax(200px,.9fr);gap:10px;margin-top:12px;align-items:center}
+      .gate-row input,.gate-row .select-btn{width:100%;padding:12px 14px;border-radius:12px;font-size:16px;background:var(--panel-2);color:var(--ink);border:1px solid var(--brd)}
+      .btn{background:var(--brand-indigo);color:#fff;border:1px solid rgba(32,35,59,.9);border-radius:12px;padding:12px 14px;font-weight:700;cursor:pointer;font-size:16px}
+      .btn.secondary{background:var(--brand-yellow);color:#1a1a1a;border-color:var(--brand-yellow)}
+      .gate-card>.note{opacity:.85;font-size:13px;line-height:1.35;margin-top:8px}
+
+      #preloadOverlay{position:fixed;inset:0;z-index:10000;display:none;place-items:center;background:radial-gradient(1000px 600px at 50% 30%,#13152A 0%,#070812 70%)}
+      #preloadCard{width:min(92vw,520px);padding:22px;border-radius:16px;background:rgba(16,18,38,.92);border:1px solid rgba(32,35,59,.9);box-shadow:0 10px 40px rgba(0,0,0,.45)}
+      #preText{font-weight:700;margin:0 0 10px 0}.bar{height:12px;border-radius:999px;background:rgba(255,255,255,.08);overflow:hidden;border:1px solid rgba(32,35,59,.9)}
+      .bar>i{display:block;height:100%;width:0%;background:linear-gradient(90deg,var(--brand-yellow),#ffd84e);transition:width .15s ease}
+      #small{opacity:.85;font-size:12px;margin-top:8px}
+
+      /* Responsive tweaks */
+      #bottomBar{ gap:clamp(6px, 1.6vmin, 10px); padding:clamp(6px, 1.6vmin, 10px); padding-bottom:calc(env(safe-area-inset-bottom) + clamp(6px, 1.6vmin, 10px)); flex-wrap:wrap; }
+      .btn-circle{ width:clamp(28px, 7vmin, 36px); height:clamp(28px, 7vmin, 36px); font-size:clamp(14px, 2.4vmin, 16px); }
+      #dpad{
+        gap:clamp(4px, 1.2vmin, 6px);
+        grid-template-columns:clamp(28px,7vmin,36px) clamp(28px,7vmin,36px) clamp(28px,7vmin,36px);
+        grid-template-rows:   clamp(28px,7vmin,36px) clamp(28px,7vmin,36px) clamp(28px,7vmin,36px);
+      }
+      @media (max-width:420px){
+        #dpad{
+          grid-template-areas:"up up" "left right" "down down";
+          grid-template-columns:clamp(28px,8vmin,34px) clamp(28px,8vmin,34px);
+          grid-template-rows:clamp(28px,8vmin,34px) clamp(28px,8vmin,34px) clamp(28px,8vmin,34px);
+        }
+      }
+      @supports (height: 100svh){ #renderCanvas{ height:100svh; } }
+
+      /* ==== Mirror HUD (Agent only): invisible container, no blur ==== */
+      #mirrorHud{
+        position:fixed;
+        right:max(12px, env(safe-area-inset-right));
+        bottom:calc(max(12px, env(safe-area-inset-bottom)) + 6px);
+        width:20vw; max-width:320px;
+        height:26vh; max-height:300px;
+        pointer-events:none; z-index:39;
+        background:transparent!important; border:none!important; box-shadow:none!important; backdrop-filter:none!important;
+      }
+      /* Tiny numeric badge per viewer, inside each tile (bottom-right) */
+      .mirror-badge{
+        position:absolute;
+        width:22px; height:22px; border-radius:999px;
+        background:#F3C400; color:#1a1a1a;
+        font:700 12px/22px Inter, system-ui, -apple-system, "Segoe UI", Roboto, Arial;
+        text-align:center; box-shadow:0 2px 6px rgba(0,0,0,.25);
+        pointer-events:none;
+      }
+    </style>
+  </head>
+  <body>
+    <canvas id="renderCanvas"></canvas>
+
+    <!-- Agent-only mirror badges; hidden on Viewer via body[data-role="viewer"] -->
+    <div id="mirrorHud" aria-hidden="true"></div>
+
+    <div id="brandLogo"><img id="brandImg" src="/assets/auro-logo.png" alt="Auro Realty" /></div>
+
+    <!-- Bottom controls (Agent) -->
+    <div id="bottomBar" hidden>
+      <div class="select" id="expSelectLiveWrap" data-open="false">
+        <button type="button" class="select-btn" id="expBtn" aria-haspopup="listbox" aria-expanded="false">
+          <span id="expLabel">Amenities</span>
+          <svg width="14" height="10" viewBox="0 0 12 8" aria-hidden="true"><path fill="#F3C400" d="M1 1l5 6 5-6"/></svg>
+        </button>
+        <ul class="select-list" id="expList" role="listbox">
+          <li data-value="amenities" class="active" role="option" aria-selected="true">Amenities</li>
+          <li data-value="skywalk" role="option">Skywalk</li>
+          <li data-value="flat" role="option">Flat</li>
+        </ul>
+        <select id="expSelectLive" hidden>
+          <option value="amenities" selected>Amenities</option>
+          <option value="skywalk">Skywalk</option>
+          <option value="flat">Flat</option>
+        </select>
+      </div>
+      <div id="dpad" aria-label="Rotate">
+        <button id="btnUp" class="btn-circle"   title="Look up"    aria-label="Look up">▲</button>
+        <button id="btnLeft" class="btn-circle" title="Turn left"  aria-label="Turn left">◀</button>
+        <button id="btnRight" class="btn-circle" title="Turn right" aria-label="Turn right">▶</button>
+        <button id="btnDown" class="btn-circle" title="Look down"  aria-label="Look down">▼</button>
+      </div>
+      <div id="zoomWrap" aria-label="Zoom">
+        <button id="zoomIn"  class="btn-circle" title="Zoom in" aria-label="Zoom in">＋</button>
+        <button id="zoomOut" class="btn-circle" title="Zoom out" aria-label="Zoom out">－</button>
+      </div>
+      <button id="btnMini"   class="btn-circle" title="Hide/Show minimap" aria-label="Toggle minimap">🗺</button>
+      <button id="btnMirror" class="btn-circle" title="Hide/Show mirror"  aria-label="Toggle mirror">🪞</button>
+      <button id="btnFS"     class="btn-circle" title="Fullscreen"        aria-label="Fullscreen">⛶</button>
+    </div>
+
+    <!-- Role gate -->
+    <div id="roleGate">
+      <div class="gate-card">
+        <div class="gate-row">
+          <input id="roomInput" placeholder="Enter a room number" />
+          <div class="select drop-down" id="gateExpWrap" data-open="false">
+            <button type="button" class="select-btn" id="gateExpBtn" aria-haspopup="listbox" aria-expanded="false">
+              <span id="gateExpLabel">Amenities</span>
+              <svg width="14" height="10" viewBox="0 0 12 8" aria-hidden="true"><path d="M1 1l5 6 5-6"/></svg>
+            </button>
+            <ul class="select-list" id="gateExpList" role="listbox">
+              <li data-value="amenities" class="active" role="option" aria-selected="true">Amenities</li>
+              <li data-value="skywalk" role="option">Skywalk</li>
+              <li data-value="flat" role="option">Flat</li>
+            </ul>
+            <select id="expSelect" hidden>
+              <option value="amenities" selected>Amenities</option>
+              <option value="skywalk">Skywalk</option>
+              <option value="flat">Flat</option>
+            </select>
+          </div>
+        </div>
+        <div class="gate-actions" style="display:flex;gap:10px;margin-top:12px;">
+          <button id="btnGuide" class="btn secondary">Guide</button>
+          <button id="btnViewer" class="btn">Viewer</button>
+        </div>
+        <div class="note">To view the property in self exploratory mode join as <b>Guide</b>.</div>
+      </div>
+    </div>
+
+    <!-- Preloader -->
+    <div id="preloadOverlay" aria-live="polite">
+      <div id="preloadCard">
+        <p id="preText">Preparing experience… <span id="pct">0%</span></p>
+        <div class="bar"><i id="barFill" style="width:0%"></i></div>
+        <div id="small"><span id="count">0</span> / <span id="total">0</span> panoramas</div>
+      </div>
+    </div>
+
+    <script>
+      (function(){
+        if (!('serviceWorker' in navigator)) return;
+        const isLocalhost = ['localhost','127.0.0.1','[::1]'].includes(location.hostname);
+        const isPrivateIPv4 = /^\d+\.\d+\.\d+\.\d+$/.test(location.hostname);
+        if (isLocalhost || (window.isSecureContext && !isPrivateIPv4)) {
+          window.addEventListener('load', () => {
+            navigator.serviceWorker.register('/sw.js', { scope: '/' }).catch(console.warn);
+          });
+        } else {
+          console.info('[SW] Skipping on private/unentrusted host:', location.origin);
+        }
+      })();
+    </script>
+
+    <script type="module">
+      import { initAgent } from "./agent.js?v=11";
+      import { initViewer } from "./user.js?v=11";
+
+      const BASE_URL = (import.meta?.env?.BASE_URL ?? "/");
+
+      const gate   = document.getElementById("roleGate");
+      const room   = document.getElementById("roomInput");
+      const bar    = document.getElementById("bottomBar");
+      const expSel = document.getElementById("expSelect");
+      const expLive= document.getElementById("expSelectLive");
+      const mirrorHud = document.getElementById("mirrorHud");
+
+      /* custom select */
+      function wireCustomSelect({wrapId, btnId, listId, labelId, selectId}){
+        const wrap  = document.getElementById(wrapId);
+        const btn   = document.getElementById(btnId);
+        const list  = document.getElementById(listId);
+        const label = document.getElementById(labelId);
+        const sel   = document.getElementById(selectId);
+        if (!wrap || !btn || !list || !label || !sel) return ()=>{};
+
+        function setValue(val, trigger=true){
+          sel.value = val;
+          label.textContent = sel.options[sel.selectedIndex]?.textContent || val;
+          [...list.children].forEach(li=>{
+            const active = li.getAttribute("data-value")===val;
+            li.classList.toggle("active", active);
+            li.setAttribute("aria-selected", active ? "true" : "false");
+          });
+          if (trigger) sel.dispatchEvent(new Event("change",{bubbles:true}));
+        }
+
+        btn.addEventListener("click", ()=>{
+          const open = wrap.getAttribute("data-open")==="true";
+          wrap.setAttribute("data-open", open ? "false" : "true");
+          btn.setAttribute("aria-expanded", (!open).toString());
+        });
+
+        list.addEventListener("click", (e)=>{
+          const li = e.target.closest?.("li[data-value]");
+          if (!li) return;
+          setValue(li.getAttribute("data-value"));
+          wrap.setAttribute("data-open","false");
+          btn.setAttribute("aria-expanded","false");
+        });
+
+        document.addEventListener("click", (e)=>{
+          if (wrap && !wrap.contains(e.target)){
+            wrap.setAttribute("data-open","false");
+            btn.setAttribute("aria-expanded","false");
+          }
+        }, { passive:true });
+
+        setValue(sel.value || sel.options[0]?.value || "amenities", false);
+        return setValue;
+      }
+      const setLiveExp = wireCustomSelect({ wrapId:"expSelectLiveWrap", btnId:"expBtn", listId:"expList", labelId:"expLabel", selectId:"expSelectLive" });
+      wireCustomSelect({ wrapId:"gateExpWrap", btnId:"gateExpBtn", listId:"gateExpList", labelId:"gateExpLabel", selectId:"expSelect" });
+
+      /* tiny preloader */
+      const overlay = document.getElementById("preloadOverlay");
+      const pctEl   = document.getElementById("pct");
+      const barFill = document.getElementById("barFill");
+      const cntEl   = document.getElementById("count");
+      const totEl   = document.getElementById("total");
+
+      async function fetchWalkthrough(exp){
+        const url = `${BASE_URL}${exp}/walkthrough.json`.replace(/\/{2,}/g,"/");
+        const res = await fetch(url, { cache:"no-cache" });
+        const text = await res.text();
+        if (!res.ok) throw new Error(`walkthrough.json fetch failed (${res.status}) at ${url}`);
+        try { return JSON.parse(text); }
+        catch { throw new Error(`Expected JSON at ${url}, got HTML. First bytes: ${text.slice(0,80)}`); }
+      }
+      function preloadImages(urls, onProgress){
+        return new Promise(resolve=>{
+          const total = urls.length;
+          if (total === 0){ onProgress(1,0,0); return resolve(); }
+          let done=0, errs=0;
+          urls.forEach(u=>{
+            const img = new Image();
+            img.onload  = () => { done++; onProgress(done/total, done, errs); if (done+errs===total) resolve(); };
+            img.onerror = () => { errs++; onProgress((done+errs)/total, done, errs); if (done+errs===total) resolve(); };
+            img.decoding="async"; img.src=u;
+          });
+        });
+      }
+      async function preloadExperience(exp){
+        overlay.style.display="grid"; pctEl.textContent="0%"; barFill.style.width="0%"; cntEl.textContent="0"; totEl.textContent="0";
+        const data = await fetchWalkthrough(exp);
+        const files = Array.from(new Set((data?.nodes||[]).map(n => `${BASE_URL}${exp}/panos/${n.file}`.replace(/\/{2,}/g,"/"))));
+        const IS_MOBILE = /Android|iPhone|iPad|iPod|Quest|Oculus/i.test(navigator.userAgent);
+        const stageList = IS_MOBILE ? files.slice(0, Math.min(files.length, 6)) : files;
+        totEl.textContent = String(stageList.length);
+        await preloadImages(stageList, (p, ok) => {
+          const pct = Math.round(p*100);
+          pctEl.textContent = pct + "%";
+          barFill.style.width = pct + "%";
+          cntEl.textContent = String(ok);
+        });
+        await new Promise(r=>setTimeout(r,60));
+        overlay.style.display="none";
+      }
+
+      /* press & hold helper */
+      function holdRepeat(el, fn, firstDelay=230, every=45){
+        if (!el) return;
+        let t=null, i=null;
+        const start=(e)=>{ if (e.isPrimary===false) return; e.preventDefault();
+          el.setPointerCapture?.(e.pointerId);
+          if (t||i) return; fn();
+          t=setTimeout(()=>{ i=setInterval(fn,every); }, firstDelay);
+        };
+        const stop =(e)=>{ if (i) clearInterval(i); i=null; if (t) clearTimeout(t); t=null;
+          try{ el.releasePointerCapture?.(e.pointerId); }catch{} };
+        el.addEventListener("pointerdown", start, { passive:false });
+        el.addEventListener("pointerup", stop,   { passive:false });
+        el.addEventListener("pointercancel", stop, { passive:false });
+        el.addEventListener("pointerleave", stop, { passive:false });
+      }
+
+      let app=null, miniVisible=true;
+
+      async function startGuide(){
+        const roomId = (room?.value?.trim()) || "demo";
+        const e = (expSel?.value) || "amenities";
+        await preloadExperience(e);
+        gate?.remove(); bar.hidden=false; setLiveExp?.(e,false);
+        document.body.removeAttribute("data-role"); // ensure agent UI visible
+        mirrorHud.style.display = ""; // visible for Agent
+        app = await initAgent({ roomId, exp:e });
+
+       const DEG = Math.PI/180, STEP = 30*DEG, STEP_Z = 0.04;
+
+// Right should rotate right (+yaw); Left should rotate left (-yaw)
+document.getElementById("btnLeft") ?.addEventListener("click", () => app?.nudgeYaw?.(-STEP), { passive:true });
+document.getElementById("btnRight")?.addEventListener("click", () => app?.nudgeYaw?.(+STEP), { passive:true });
+document.getElementById("btnUp")   ?.addEventListener("click", () => app?.nudgePitch?.(+STEP), { passive:true });
+document.getElementById("btnDown") ?.addEventListener("click", () => app?.nudgePitch?.(-STEP), { passive:true });
+
+window.addEventListener("keydown",(e)=>{
+  if (e.key==="ArrowLeft")  { app?.nudgeYaw?.(-STEP); }
+  if (e.key==="ArrowRight") { app?.nudgeYaw?.(+STEP); }
+  if (e.key==="ArrowUp")    { e.preventDefault(); app?.nudgePitch?.(+STEP); }
+  if (e.key==="ArrowDown")  { e.preventDefault(); app?.nudgePitch?.(-STEP); }
+}, { passive:false });
+
+
+        holdRepeat(document.getElementById("zoomIn"),  () => app?.nudgeZoom?.( STEP_Z));
+        holdRepeat(document.getElementById("zoomOut"), () => app?.nudgeZoom?.(-STEP_Z));
+
+        document.getElementById("btnMini").addEventListener("click",()=>{
+          miniVisible = !miniVisible;
+          document.body.classList.toggle("mini-hidden", !miniVisible);
+          document.querySelectorAll(".mini-wrap").forEach(el=> el.style.display = miniVisible? "" : "none");
+        });
+
+        document.getElementById("btnMirror").addEventListener("click", ()=>{ app?.toggleMirror?.(); });
+
+        document.getElementById("btnFS").addEventListener("click", async ()=>{
+          const d=document; const el=d.documentElement;
+          if (!d.fullscreenElement && el.requestFullscreen) await el.requestFullscreen();
+          else if (d.exitFullscreen) await d.exitFullscreen();
+        });
+
+        expLive?.addEventListener("change", async () => {
+          const next = expLive.value;
+          await preloadExperience(next);
+          app?.switchExperience?.(next);
+        });
+      }
+
+      async function startViewer(){
+        const roomId = (room?.value?.trim()) || "demo";
+        const e = (expSel?.value) || "amenities";
+        await preloadExperience(e);
+        document.body.dataset.role = "viewer";   // hard-hide UI via CSS
+        gate?.remove();
+        bar.hidden = true;           // no HUD even if CSS fails
+        mirrorHud.remove();          // no mirror overlay on Viewer
+        await initViewer({ roomId, exp:e });
+      }
+
+      document.getElementById("btnGuide") ?.addEventListener("click", startGuide, { passive:true });
+      document.getElementById("btnViewer")?.addEventListener("click", startViewer, { passive:true });
+    </script>
+  </body>
+</html>

@@ -1,0 +1,191 @@
+*** Begin Patch
+*** Update File: src/app.js
+@@
+-const overlay = document.getElementById("preloadOverlay");
+-const barFill = document.getElementById("barFill");
++const overlay = document.getElementById("preloadOverlay");
++const barFill = document.getElementById("barFill");
+@@
+-function showOverlay(){ if (overlay){ overlay.setAttribute('aria-busy','true'); } }
+-function hideOverlay(){ if (overlay){ overlay.removeAttribute('aria-busy'); overlay.style.display='none'; } }
+-function setProgress(p){ const pct = Math.max(0, Math.min(100, Math.round(p*100))); if (barFill) barFill.style.width = `${pct}%`; }
++function showOverlay(){ if (overlay){ overlay.setAttribute('aria-busy','true'); } }
++function hideOverlay(){ if (overlay){ overlay.removeAttribute('aria-busy'); overlay.style.display='none'; } }
++function setProgress(p){ const pct = Math.max(0, Math.min(100, Math.round(p*100))); if (barFill) barFill.style.width = `${pct}%`; }
+@@
+-addEventListener('loading:show', ()=>{ showOverlay(); setProgress(0); });
+-addEventListener('loading:progress', (ev)=>{ const d=ev?.detail||{}; setProgress(d.progress ?? 0); });
+-addEventListener('loading:hide', ()=>{ hideOverlay(); });
++addEventListener('loading:show', ()=>{ showOverlay(); setProgress(0); });
++addEventListener('loading:progress', (ev)=>{ const d=ev?.detail||{}; setProgress(d.progress ?? 0); });
++addEventListener('loading:hide', ()=>{ hideOverlay(); });
+@@
+-async function preloadExperience(expId) {
+-  showOverlay();
+-  setProgress(0);
+-
+-  const data = await fetchWalkthrough(expId);
+-  const files = Array.from(new Set((data?.nodes || []).map((node) => choosePanoPath(experienceAssetUrl(expId, `panos/${node.file}`)))));
+-  const isMobile = /Android|iPhone|iPad|iPod|Quest|Oculus/i.test(navigator.userAgent);
+-  const conn = navigator.connection || navigator.webkitConnection || navigator.mozConnection;
+-  const saveData = Boolean(conn?.saveData);
+-  const slowNet = /^(slow-)?2g$/i.test(conn?.effectiveType || "");
+-  const head = document.head || document.getElementsByTagName('head')[0];
+-  if (files[0] && head) {
+-    try {
+-      const link = document.createElement('link');
+-      link.rel = 'preload'; link.as = 'image'; link.href = files[0];
+-      link.fetchPriority = 'high';
+-      head.appendChild(link);
+-    } catch {}
+-  }
+-  // Preload fewer panos on mobile/slow networks for faster start
+-  const preloadCount = saveData || slowNet ? 1 : (isMobile ? 2 : 4);
+-  const stageList = files.slice(0, Math.min(files.length, preloadCount));
+-
+-  // ask SW to precache these; it will no-op if not ready
+-  try { navigator.serviceWorker?.controller?.postMessage({ type: 'precache', urls: stageList }); } catch {}
+-
+-  await preloadImages(stageList, (progress) => {
+-    setProgress(progress);
+-  }, 2);
+-
+-  await new Promise((res) => setTimeout(res, 60));
+-  hideOverlay();
+-}
++async function preloadExperience(expId) {
++  // Keep the overlay visible across the entire boot; app will hide it
++  // only after the engine is fully initialized and first frame is ready.
++  showOverlay();
++  setProgress(0);
++
++  const data = await fetchWalkthrough(expId);
++  const files = Array.from(new Set((data?.nodes || []).map((node) => choosePanoPath(experienceAssetUrl(expId, `panos/${node.file}`)))));
++
++  // Preload ALL pano images for the selected experience so the next view is fully ready.
++  // Also hint the first image with a high-priority preload.
++  const head = document.head || document.getElementsByTagName('head')[0];
++  if (files[0] && head) {
++    try {
++      const link = document.createElement('link');
++      link.rel = 'preload'; link.as = 'image'; link.href = files[0];
++      link.fetchPriority = 'high';
++      head.appendChild(link);
++    } catch {}
++  }
++
++  // Ask SW (if present) to precache; it will no-op if not ready
++  try { navigator.serviceWorker?.controller?.postMessage({ type: 'precache', urls: files }); } catch {}
++
++  await preloadImages(files, (progress) => {
++    // Broadcast for the UI overlay listener and update locally too
++    try { dispatchEvent(new CustomEvent('loading:progress', { detail: { progress } })); } catch {}
++    setProgress(progress);
++  }, 4);
++
++  // Do NOT hide the overlay here; the engine init will signal completion.
++}
+@@
+-async function startGuide() {
++async function startGuide() {
+   const { id } = getSelectedExperience();
+   syncActiveExperience(id, { syncGate: true, syncLive: true });
+   await preloadExperience(id);
+ 
+   const roomId = roomInput?.value?.trim() || "demo";
+-  gate?.remove();
+-  if (bottomBar) bottomBar.hidden = false;
+-  
+-  // show loading while engine chunk downloads on first use
+-  dispatchEvent(new CustomEvent('loading:show'));
++  gate?.remove();
++  if (bottomBar) bottomBar.hidden = false;
++  
++  // Engine chunk + init; overlay remains visible from preload until we're fully ready
+   const { initAgent } = await import("./engine/agent.js");
+-  // Do not hide yet; preloadExperience will hide when ready
+-  state.agentApi = await initAgent({ roomId, exp: id, experiencesMeta: state.manifest });
++  state.agentApi = await initAgent({ roomId, exp: id, experiencesMeta: state.manifest });
++  // Now the first frame is ready; hide the loader.
++  dispatchEvent(new CustomEvent('loading:hide'));
+ }
+@@
+-async function startViewer() {
++async function startViewer() {
+   const { id } = getSelectedExperience();
+   syncActiveExperience(id, { syncGate: true, syncLive: true });
+   await preloadExperience(id);
+ 
+   const roomId = roomInput?.value?.trim() || "demo";
+   gate?.remove();
+   if (bottomBar) bottomBar.hidden = true;
+   state.agentApi = null;
+-  dispatchEvent(new CustomEvent('loading:show'));
+   const { initViewer } = await import("./engine/viewer.js");
+-  // Keep visible until preload completes
+-  await initViewer({ roomId, exp: id, experiencesMeta: state.manifest });
++  await initViewer({ roomId, exp: id, experiencesMeta: state.manifest });
++  dispatchEvent(new CustomEvent('loading:hide'));
+ }
+@@
+-  // Fullscreen with iOS fallback (toggle CSS-based fullscreen when API unsupported)
+-  const doFS = async () => {
+-    const d = document;
+-    const root = document.documentElement;
+-    const fsEl = d.fullscreenElement || d.webkitFullscreenElement;
+-    const canFS = !!(root.requestFullscreen || root.webkitRequestFullscreen);
+-    const isIOS = /iPhone|iPad|iPod/i.test(navigator.userAgent);
+-    try {
+-      if (fsEl) {
+-        await (d.exitFullscreen?.() || d.webkitExitFullscreen?.());
+-        document.body.classList.remove('fakefs');
+-        return;
+-      }
+-      if (canFS && !isIOS) {
+-        await (root.requestFullscreen?.() || root.webkitRequestFullscreen?.());
+-      } else {
+-        // iOS fallback: hide UI chrome and use 100svh canvas
+-        document.body.classList.toggle('fakefs');
+-      }
+-      // Try to lock orientation when entering
+-      if (screen?.orientation?.lock) {
+-        try { await screen.orientation.lock('landscape'); } catch {}
+-      }
+-      // Nudge scroll to hide Safari bars
+-      try { window.scrollTo(0, 1); } catch {}
+-    } catch (err) {
+-      // If request failed, fallback to CSS mode
+-      document.body.classList.toggle('fakefs');
+-    }
+-  };
++  // Fullscreen with iOS fallback: prefer canvas element; fallback to CSS-based fullscreen on iOS
++  const doFS = async () => {
++    const d = document;
++    const canvas = d.getElementById('renderCanvas');
++    const target = canvas || d.documentElement;
++    const fsEl = d.fullscreenElement || d.webkitFullscreenElement || d.mozFullScreenElement || d.msFullscreenElement;
++    const isIOS = /iPhone|iPad|iPod/i.test(navigator.userAgent);
++    try {
++      if (fsEl) {
++        await (d.exitFullscreen?.() || d.webkitExitFullscreen?.() || d.mozCancelFullScreen?.() || d.msExitFullscreen?.());
++        document.body.classList.remove('fakefs');
++        return;
++      }
++      if (!isIOS && (target.requestFullscreen || target.webkitRequestFullscreen || target.mozRequestFullScreen || target.msRequestFullscreen)) {
++        await (target.requestFullscreen?.() || target.webkitRequestFullscreen?.() || target.mozRequestFullScreen?.() || target.msRequestFullscreen?.());
++      } else {
++        // iOS fallback: hide UI chrome and force canvas to fixed fullscreen via CSS
++        document.body.classList.toggle('fakefs');
++      }
++      // Try to lock orientation when entering
++      if (screen?.orientation?.lock) {
++        try { await screen.orientation.lock('landscape'); } catch {}
++      }
++      // Nudge scroll to hide Safari bars
++      try { window.scrollTo(0, 1); } catch {}
++    } catch (err) {
++      // If request failed, fallback to CSS mode
++      document.body.classList.toggle('fakefs');
++    }
++  };
+*** End Patch

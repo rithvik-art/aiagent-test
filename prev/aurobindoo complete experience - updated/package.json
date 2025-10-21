@@ -1,0 +1,25 @@
+{
+  "name": "unified-experience",
+  "version": "1.0.0",
+  "description": "",
+  "main": "agent.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1",
+    "dev": "vite",
+    "build": "vite build",
+    "preview": "vite preview"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "module",
+  "devDependencies": {
+    "@vitejs/plugin-basic-ssl": "^2.1.0",
+    "vite": "^7.1.4"
+  },
+  "dependencies": {
+    "@babylonjs/core": "^8.26.0",
+    "@babylonjs/loaders": "^8.26.0"
+  },
+  "private": "true"
+}

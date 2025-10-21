@@ -1,0 +1,9 @@
+{
+  "experiences": [
+    {
+      "id": "office",
+      "label": "Office",
+      "stereo": true
+    }
+  ]
+}

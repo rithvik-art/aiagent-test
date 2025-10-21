@@ -1,0 +1,308 @@
+﻿<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+    <title>VR Tour</title>
+    <link rel="icon" href="data:," />
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700&display=swap" rel="stylesheet"/>
+
+    <style>
+      :root{
+        --brand-indigo:#1B1756; --brand-yellow:#F3C400;
+        --panel:#101226; --panel-2:#20233B; --ink:#E7ECFF;
+        /* Minimap base width with responsive clamp (overrides JS default 360px) */
+        --mini-width: clamp(160px, 42vw, 320px);
+      }
+      html,body{height:100%;margin:0;background:#000;color:var(--ink);
+        font-family:Inter,ui-sans-serif,system-ui,-apple-system,"Segoe UI",Roboto,Ubuntu}
+      /* Canvas uses progressive fallbacks for older iOS */
+      #renderCanvas{
+        width:100vw; height:100vh; /* fallback */
+        height:100svh;             /* iOS 15+ */
+        height:100dvh;             /* modern */
+        display:block; touch-action:none
+      }
+      /* CSS fallback fullscreen (iOS without Fullscreen API, and iframes) */
+      body.fakefs { overflow:hidden }
+      body.fakefs #renderCanvas{ position:fixed; inset:0; width:100vw; height:100vh; height:100svh; height:100dvh; }
+
+      /* bottom-left bar (reduced opacity) */
+      #bottomBar{
+        position:fixed; left:12px; bottom:12px; z-index:40;
+        display:flex; gap:12px; align-items:center; flex-wrap:wrap;
+        background: rgba(16,18,38,.55);
+        border: 1px solid rgba(32,35,59,.55);
+        border-radius:18px; padding:12px 14px;
+        -webkit-backdrop-filter: blur(2px); backdrop-filter: blur(2px);
+      }
+
+      /* === Custom dropdown (used for both gate + live) === */
+      .select{ position:relative; width:auto; }
+      .select-btn{
+        display:flex; align-items:center; justify-content:space-between; gap:10px;
+        min-width:180px; padding:12px 14px; padding-right:42px;
+        background:#0f1424; color:var(--ink);
+        border:1px solid rgba(32,35,59,.55); border-radius:12px;
+        font-size:15px; line-height:1.1; cursor:pointer;
+      }
+      .select-btn:focus{ outline:none; box-shadow:0 0 0 2px var(--brand-yellow); }
+      .select-btn svg{ position:absolute; right:12px; pointer-events:none; transition:transform .18s ease; }
+      .select[data-open="true"] .select-btn svg{ transform:rotate(180deg); }
+
+      .select-list{
+        position:absolute; bottom:calc(100% + 8px); left:0; right:0;
+        background:#0f1424; border:1px solid var(--brand-yellow);
+        border-radius:12px; padding:6px 0; margin:0; list-style:none;
+        box-shadow:0 10px 24px rgba(0,0,0,.35); display:none; z-index:50;
+        max-height:280px; overflow:auto;
+      }
+      /* drop downward when used inside the gate row */
+      .select.drop-down .select-list{ top:calc(100% + 8px); bottom:auto; }
+      .select[data-open="true"] .select-list{ display:block; }
+      .select-list li{
+        padding:12px 14px; font-size:15px; cursor:pointer; color:var(--ink);
+      }
+      .select-list li:hover,
+      .select-list li.active{
+        background:var(--brand-yellow); color:#1a1a1a;
+      }
+      /* hide native selects we sync with */
+      #expSelectLive, #expSelect{ display:none; }
+
+      /* D-pad */
+      #dpad{
+        display:grid;
+        grid-template-areas:
+          ".   up    ."
+          "left .   right"
+          ".  down   .";
+        grid-template-columns: 42px 42px 42px;
+        grid-template-rows: 42px 42px 42px;
+        gap:8px;
+      }
+      #dpad button{
+        width:42px; height:42px;
+        border:1px solid rgba(32,35,59,.55);
+        border-radius:12px; cursor:pointer;
+        background: rgba(27,23,86,.65);
+        color: var(--brand-yellow);
+        font-size:18px; display:grid; place-items:center;
+        transition: transform .05s ease, background .15s ease, border-color .15s ease;
+      }
+      #dpad button:hover{ background: rgba(27,23,86,.8); border-color: var(--brand-yellow) }
+      #dpad button:active{ transform: translateY(1px) }
+      #btnUp{grid-area:up;} #btnDown{grid-area:down;} #btnLeft{grid-area:left;} #btnRight{grid-area:right;}
+
+      /* minimap (top-right) */
+      .mini-wrap{ position:fixed!important; top:12px!important; right:12px!important; left:auto!important }
+      .mini-wrap .mini-panel{
+        background: rgba(16,18,38,.86)!important; border:1px solid rgba(32,35,59,.9)!important; color:var(--ink)!important;
+      }
+      .mini-wrap select,.mini-wrap button{ font-family:Inter,ui-sans-serif,system-ui,-apple-system,"Segoe UI",Roboto,Ubuntu!important }
+      .mini-wrap .point{ background: var(--brand-yellow)!important }
+
+      /* logo top-left */
+      #brandLogo{
+        position:fixed; top:12px; left:12px; z-index:41;
+        padding:8px 10px; border-radius:12px;
+        background: rgba(0,0,0,.22); opacity:.95;
+        -webkit-backdrop-filter: blur(2px); backdrop-filter: blur(2px);
+        user-select:none; pointer-events:none;
+      }
+      #brandLogo img{ height:90px; width:auto; display:block; opacity:.85 }
+
+      /* XR/WebXR button: make more transparent */
+      .xr-button,
+      .xr-button-container button,
+      .xr-button-overlay button,
+      .webxr-button,
+      .babylonVRicon {
+        opacity: .5 !important;
+        transition: opacity .15s ease;
+      }
+      .xr-button:hover,
+      .xr-button-container button:hover,
+      .xr-button-overlay button:hover,
+      .webxr-button:hover,
+      .babylonVRicon:hover { opacity: .8 !important; }
+
+      /* Join gate overlay */
+      #roleGate{ position:fixed; inset:0; z-index:9999; display:grid; place-items:center;
+        background: radial-gradient(1000px 600px at 50% 30%, #13152A, #070812); }
+      .gate-card{
+        width:min(92vw,560px); padding:22px; border-radius:16px;
+        background: rgba(16,18,38,.86); color:var(--ink);
+        border:1px solid rgba(32,35,59,.9); box-shadow:0 10px 40px rgba(0,0,0,.45);
+        font:14px/1.4 Inter, ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, Ubuntu;
+      }
+      .gate-row{ display:flex; gap:10px; margin-top:12px; align-items:center; }
+      .gate-row input{
+        flex:1; background:#0f1424; color:var(--ink); border:1px solid rgba(32,35,59,.9);
+        padding:12px 14px; border-radius:12px; outline:none;
+      }
+      .btn{ background: var(--brand-indigo); color:#fff; border:1px solid rgba(32,35,59,.9);
+        border-radius:10px; padding:10px 12px; font-weight:700; cursor:pointer; }
+      .btn.secondary{ background: var(--brand-yellow); color:#1a1a1a; border-color: var(--brand-yellow); }
+      .btn:hover{ filter: brightness(1.05); }
+      /* Viewer must never see HUD/minimap/mirror */
+      body[data-role="viewer"] #bottomBar,
+      body[data-role="viewer"] .mini-wrap,
+      body[data-role="viewer"] #mirrorHud{ display:none !important }
+
+      /* iOS fullscreen fallback: keep UI visible over canvas */
+      body.fakefs { background:#000; overflow:hidden }
+      /* Force true fullscreen canvas in CSS fallback */
+      body.fakefs #renderCanvas{ position:fixed; inset:0; width:100vw; height:100vh; height:100svh; height:100dvh; z-index:99997 }
+      /* SVG sizes */
+      #dpad button svg{ width:16px; height:16px; display:block; stroke:currentColor; fill:none }
+      /* Simple tooltips using data-tip */
+      [data-tip]{ position:relative }
+      [data-tip]:hover::after{
+        content: attr(data-tip);
+        position:absolute; bottom:calc(100% + 8px); left:50%; transform:translateX(-50%);
+        background:#0f1424; color:var(--ink); border:1px solid rgba(32,35,59,.7);
+        padding:6px 8px; border-radius:8px; font-size:12px; white-space:nowrap; z-index:60;
+        box-shadow:0 6px 16px rgba(0,0,0,.35);
+      }
+      [data-tip]:hover::before{
+        content:""; position:absolute; bottom:100%; left:50%; transform:translateX(-50%);
+        border:6px solid transparent; border-top-color:rgba(32,35,59,.7);
+        filter:drop-shadow(0 2px 2px rgba(0,0,0,.2));
+      }
+      /* Circle buttons + zoom column (legacy UI parity) */
+      .btn-circle{width:36px;height:36px;border:1px solid rgba(32,35,59,.55);border-radius:10px;cursor:pointer;background:rgba(27,23,86,.65);color:var(--brand-yellow);display:grid;place-items:center;transition:transform .05s ease;font-size:16px}
+      .btn-circle:active{ transform: translateY(1px) }
+      #zoomWrap{display:flex;flex-direction:column;gap:6px;margin-left:2px}
+          /* ==== Mirror HUD (Agent only): invisible container for viewer badges ==== */
+      #mirrorHud{
+        position:fixed; z-index:39;
+        right:max(12px,env(safe-area-inset-right));
+        bottom:max(12px,env(safe-area-inset-bottom));
+        top:auto; left:auto;
+        width:26vw; height:30vh; pointer-events:none;
+      }
+      .mirror-badge{
+        position:absolute; width:22px; height:22px; border-radius:999px;
+        background:#F3C400; color:#1a1a1a; font:700 14px/22px Inter, ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto;
+        text-align:center; box-shadow:0 2px 6px rgba(0,0,0,.35);
+      }      .btn-circle svg{ width:20px; height:20px; display:block; stroke: currentColor; fill: none }
+
+      /* Small-screen tuning (portrait and small screens) */
+      @media (max-width: 480px), (max-height: 640px) {
+        #bottomBar{ gap:8px; padding:8px 10px; border-radius:14px; }
+        .select-btn{ min-width: 140px; padding:10px 12px; padding-right:36px; font-size:13px; }
+        .select-list li{ padding:10px 12px; font-size:13px; }
+        #dpad{ gap:6px; grid-template-columns: 34px 34px 34px; grid-template-rows: 34px 34px 34px; }
+        #dpad button{ width:34px; height:34px; font-size:14px; border-radius:10px; }
+        .btn-circle{ width:30px; height:30px; font-size:14px; border-radius:8px; }
+        #zoomWrap{ gap:4px; }
+        #brandLogo img{ height:70px; }
+        .mini-wrap{ --pad: 8px; }
+      }
+
+      /* Landscape on phones: make controls even smaller and keep bottom bar compact */
+      @media (orientation: landscape) and (max-height: 480px) {
+        #bottomBar{ gap:6px; padding:6px 8px; border-radius:12px; }
+        .select-btn{ min-width: 120px; padding:8px 10px; padding-right:30px; font-size:12px; }
+        #dpad{ gap:4px; grid-template-columns: 28px 28px 28px; grid-template-rows: 28px 28px 28px; }
+        #dpad button{ width:28px; height:28px; font-size:12px; border-radius:8px; }
+        .btn-circle{ width:26px; height:26px; font-size:12px; border-radius:7px; }
+        #zoomWrap{ gap:3px; }
+      }
+      /* Loading overlay (bar only) */
+      #preloadOverlay{ position:fixed; inset:0; display:none; place-items:center; z-index:99999; background:rgba(0,0,0,.62); -webkit-backdrop-filter: blur(1.5px); backdrop-filter: blur(1.5px); opacity:0; transition:opacity .15s ease }
+      #preloadOverlay[aria-busy="true"]{ display:grid; opacity:1 }
+      .loader-card{ width:min(70vw,420px); background:#0f1424; border:1px solid rgba(32,35,59,.55); border-radius:14px; padding:16px }
+      .bar{ height:10px; border-radius:999px; background:#1d2540; overflow:hidden; border:1px solid rgba(255,255,255,.08) }
+      .bar > i{ display:block; height:100%; width:0%; background:linear-gradient(90deg, var(--brand-yellow), #ffdd55); border-radius:inherit; transition:width .12s ease }
+    </style>
+    <link rel="preconnect" href="https://vrsync.dev.opensky.co.in" crossorigin>
+    <!-- iOS PWA fullscreen when added to Home Screen -->
+    <meta name="apple-mobile-web-app-capable" content="yes">
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  </head>
+  <body>
+    <canvas id="renderCanvas"></canvas>
+    <!-- Loading overlay (centered bar; no text) -->
+    <div id="preloadOverlay" aria-hidden="true">
+      <div class="loader-card">
+        <div class="bar"><i id="barFill" style="width:0%"></i></div>
+      </div>
+    </div>
+
+    <!-- Project logo (top-left) -->
+    <div id="brandLogo"><img src="/assets/DESIGN%20LATTICE.jpg" alt="Design Lattice"></div>
+    <!-- Agent-only mirror badges; hidden on Viewer by app.js -->
+    <div id="mirrorHud" aria-hidden="true"></div>
+    <!-- Bottom-left controls -->
+    <div id="bottomBar" hidden>
+      <!-- Custom dropdown (live selector) -->
+      <div class="select" id="expSelectLiveWrap" data-open="false">
+        <button type="button" class="select-btn" id="expBtn">
+          <span id="expLabel">Select experience</span>
+          <svg width="14" height="10" viewBox="0 0 12 8" xmlns="http://www.w3.org/2000/svg"><path fill="#F3C400" d="M1 1l5 6 5-6"/></svg>
+        </button>
+        <ul class="select-list" id="expList" role="listbox"></ul>
+        <!-- Hidden native select used by JS -->
+        <select id="expSelectLive" hidden></select>
+      </div>
+
+      <div id="dpad" aria-label="Rotate">
+        <button id="btnUp">▲</button>
+        <button id="btnLeft">◀</button>
+        <button id="btnRight">▶</button>
+        <button id="btnDown">▼</button>
+      </div>
+      <div id="zoomWrap" aria-label="Zoom">
+        <button id="zoomIn"  class="btn-circle" title="Zoom in" aria-label="Zoom in">+</button>
+        <button id="zoomOut" class="btn-circle" title="Zoom out" aria-label="Zoom out">-</button>
+      </div>
+      <button id="btnMini"   class="btn-circle" title="Hide/Show minimap" aria-label="Toggle minimap"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 6l6-3 6 3 6-3v14l-6 3-6-3-6 3V3z"/><path d="M9 3v14M15 6v14"/></svg></button>
+      <button id="btnMirror" class="btn-circle" title="Hide/Show mirror"  aria-label="Toggle mirror"><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="8" width="12" height="9" rx="2"/><rect x="9" y="4" width="12" height="9" rx="2"/></svg></button>
+      
+      <button id="btnFS"     class="btn-circle" title="Fullscreen"        aria-label="Fullscreen">⤢</button>
+    </div>
+
+    <!-- Join Gate (heading removed) -->
+    <div id="roleGate">
+      <div class="gate-card">
+        <div class="gate-row">
+          <input id="roomInput" placeholder="Enter a room number" />
+          <!-- Custom dropdown in the gate (yellow highlight) -->
+          <div class="select drop-down" id="gateExpWrap" data-open="false" style="flex:1">
+            <button type="button" class="select-btn" id="gateExpBtn">
+              <span id="gateExpLabel">Select experience</span>
+              <svg width="14" height="10" viewBox="0 0 12 8" xmlns="http://www.w3.org/2000/svg"><path fill="#F3C400" d="M1 1l5 6 5-6"/></svg>
+            </button>
+            <ul class="select-list" id="gateExpList" role="listbox"></ul>
+            <!-- Hidden native select the app already uses -->
+            <select id="expSelect" hidden></select>
+          </div>
+        </div>
+
+        <div class="gate-actions" style="display:flex;gap:10px;margin-top:12px; align-items:center; flex-wrap:wrap">
+          <button id="btnGuide" class="btn secondary">Guide</button>
+          <button id="btnViewer" class="btn">Viewer</button>
+          <button id="btnAI" class="btn" title="AI-driven Guide">AI Agent</button>
+        </div>
+        <div style="opacity:.85;font-size:12px;margin-top:8px">
+          To view the property in self exploratory mode join as <b>Guide</b>.
+        </div>
+      </div>
+    </div>
+
+    <script type="module" src="/src/app.js"></script>
+
+    <script>
+      if ('serviceWorker' in navigator) {
+        try {
+          const host = location.hostname || '';
+          const isIPv4 = /^\d+\.\d+\.\d+\.\d+$/.test(host);
+          const allow = (window.isSecureContext === true) && !isIPv4 && host !== 'localhost' && host !== '127.0.0.1';
+          if (allow) navigator.serviceWorker.register('/sw.js').catch(()=>{});
+        } catch {}
+      }
+    </script>
+  </body>
+</html>
