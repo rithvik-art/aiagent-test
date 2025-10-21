@@ -26,17 +26,17 @@ if (camera.inputs && camera.inputs.addDeviceOrientation) {
   camera.inputs.addDeviceOrientation();
 }
 
-// Double-sphere setup for seamless crossfade (no black flashes)
-const sphereA = BABYLON.MeshBuilder.CreateSphere("panoA", { diameter: 10, sideOrientation: BABYLON.Mesh.BACKSIDE }, scene);
-const sphereB = BABYLON.MeshBuilder.CreateSphere("panoB", { diameter: 10, sideOrientation: BABYLON.Mesh.BACKSIDE }, scene);
-const matA = new BABYLON.StandardMaterial("matA", scene);
-const matB = new BABYLON.StandardMaterial("matB", scene);
-matA.disableLighting = true; matB.disableLighting = true;
-matA.alpha = 1; matB.alpha = 0;
-sphereA.material = matA; sphereB.material = matB;
-
-let frontSphere = sphereA, frontMat = matA;
-let backSphere = sphereB, backMat = matB;
+// PhotoDome setup for 360 photos with crossfade (no black flashes)
+let currentDome = null;
+function createDome(url) {
+  const dome = new BABYLON.PhotoDome("photoDome" + Date.now(), url, { size: 10 }, scene);
+  // Ensure we render the inside
+  if (dome.mesh && dome.mesh.material) {
+    dome.mesh.material.backFaceCulling = false;
+    dome.mesh.material.alpha = 0;
+  }
+  return dome;
+}
 
 engine.runRenderLoop(() => scene.render());
 window.addEventListener("resize", () => { applyQuality(); engine.resize(); });
@@ -98,32 +98,6 @@ function handleAICommand(c) {
   if (c.message) speak(c.message);
 }
 
-// Texture cache with small LRU to avoid crashes on mobile
-const texCache = new Map(); // zone -> { tex, t }
-const MAX_TEX = 3;
-
-function touch(zone) { const ent = texCache.get(zone); if (ent) ent.t = performance.now(); }
-function pruneCache() {
-  if (texCache.size <= MAX_TEX) return;
-  const entries = [...texCache.entries()].sort((a,b)=>a[1].t-b[1].t);
-  while (entries.length > MAX_TEX) {
-    const [oldZone, { tex }] = entries.shift();
-    try { tex.dispose(); } catch {}
-    texCache.delete(oldZone);
-  }
-}
-
-function loadZoneTexture(zone) {
-  return new Promise((resolve, reject) => {
-    if (texCache.has(zone)) { touch(zone); return resolve(texCache.get(zone).tex); }
-    const url = `./assets/${zone}.jpg`;
-    const tex = new BABYLON.Texture(url, scene, true, false, BABYLON.Texture.TRILINEAR_SAMPLINGMODE,
-      () => { tex.anisotropicFilteringLevel = 4; tex.updateSamplingMode(BABYLON.Texture.TRILINEAR_SAMPLINGMODE); texCache.set(zone, { tex, t: performance.now()}); pruneCache(); resolve(tex); },
-      (msg) => { console.warn("Failed to load texture", url, msg); reject(msg); }
-    );
-  });
-}
-
 const loadingOverlay = document.getElementById("loadingOverlay");
 
 async function moveToZone(zone) {
@@ -131,14 +105,34 @@ async function moveToZone(zone) {
   if (!safeZone) return speak("That zone is not available.");
   try {
     loadingOverlay?.classList.add("show");
-    const tex = await loadZoneTexture(safeZone);
-    backMat.emissiveTexture = tex;
-    BABYLON.Animation.CreateAndStartAnimation("fadeIn", backMat, "alpha", 60, 24, backMat.alpha, 1, BABYLON.Animation.ANIMATIONLOOPMODE_CONSTANT);
-    BABYLON.Animation.CreateAndStartAnimation("fadeOut", frontMat, "alpha", 60, 24, frontMat.alpha, 0, BABYLON.Animation.ANIMATIONLOOPMODE_CONSTANT, undefined, () => {
-      const tmpS = frontSphere; frontSphere = backSphere; backSphere = tmpS;
-      const tmpM = frontMat; frontMat = backMat; backMat = tmpM;
+    const url = `./assets/${safeZone}.jpg`;
+    const next = createDome(url);
+    // Wait for texture ready to avoid flashes
+    if (next.photoTexture && next.photoTexture.onLoadObservable) {
+      next.photoTexture.onLoadObservable.addOnce(() => {
+        // Crossfade alphas
+        if (next.mesh && next.mesh.material) {
+          BABYLON.Animation.CreateAndStartAnimation("fadeInDome", next.mesh.material, "alpha", 60, 24, next.mesh.material.alpha ?? 0, 1, BABYLON.Animation.ANIMATIONLOOPMODE_CONSTANT);
+        }
+        if (currentDome && currentDome.mesh && currentDome.mesh.material) {
+          BABYLON.Animation.CreateAndStartAnimation("fadeOutDome", currentDome.mesh.material, "alpha", 60, 24, currentDome.mesh.material.alpha ?? 1, 0, BABYLON.Animation.ANIMATIONLOOPMODE_CONSTANT, undefined, () => {
+            try { currentDome.dispose(); } catch {}
+            currentDome = next;
+            loadingOverlay?.classList.remove("show");
+          });
+        } else {
+          currentDome = next;
+          loadingOverlay?.classList.remove("show");
+          if (currentDome.mesh && currentDome.mesh.material) currentDome.mesh.material.alpha = 1;
+        }
+      });
+    } else {
+      // Fallback: no observable, just swap
+      if (currentDome) try { currentDome.dispose(); } catch {}
+      currentDome = next;
+      if (currentDome.mesh && currentDome.mesh.material) currentDome.mesh.material.alpha = 1;
       loadingOverlay?.classList.remove("show");
-    });
+    }
     console.log("Moved to zone:", safeZone);
   } catch (e) {
     loadingOverlay?.classList.remove("show");
@@ -292,12 +286,19 @@ async function setupXR() {
 }
 setupXR();
 
-// Preload initial view
-const loadingOverlay = document.getElementById('loadingOverlay');
-if (loadingOverlay) loadingOverlay.classList.add('show');
-loadZoneTexture('living_room')
-  .then(tex => { frontMat.emissiveTexture = tex; })
-  .finally(() => { loadingOverlay?.classList.remove('show'); });
+// Preload initial view using PhotoDome
+const loadingOverlay2 = document.getElementById('loadingOverlay');
+if (loadingOverlay2) loadingOverlay2.classList.add('show');
+currentDome = createDome('./assets/living_room.jpg');
+if (currentDome.photoTexture && currentDome.photoTexture.onLoadObservable) {
+  currentDome.photoTexture.onLoadObservable.addOnce(() => {
+    if (currentDome.mesh && currentDome.mesh.material) currentDome.mesh.material.alpha = 1;
+    loadingOverlay2?.classList.remove('show');
+  });
+} else {
+  if (currentDome.mesh && currentDome.mesh.material) currentDome.mesh.material.alpha = 1;
+  loadingOverlay2?.classList.remove('show');
+}
 
 // Hide voice controls if recognition unsupported
 if (!recognition) { toggleBtn.style.display = 'none'; pttBtn.style.display = 'none'; micDot.style.display = 'none'; }
