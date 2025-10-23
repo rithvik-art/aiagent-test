@@ -1,17 +1,15 @@
-#!/usr/bin/env node
-/**
- * Downscale large panos into a mobile folder to avoid iOS GPU crashes.
- * - Scans public/experiences/*/panos/*.{webp,jpg,png}
- * - Writes to public/experiences/*/panos-mobile/ with max dimension 4096 px
- * - Keeps format (webp->webp, jpg/png->jpg)
- */
+// Downscale large panos into mobile folders (4K/6K) to avoid iOS GPU crashes.
+// Scans public/experiences/*/panos/*.{webp,jpg,png} and writes variants.
 import fs from 'fs';
 import path from 'path';
 import sharp from 'sharp';
 
 const ROOT = process.cwd();
 const EXPERIENCES = path.join(ROOT, 'public', 'experiences');
-const SIZES = [4096, 6144]; // phone, tablet
+const sizesFromEnv = (process.env.PANO_MOBILE_SIZES || process.argv.find(a=>a.startsWith('--sizes='))?.split('=')[1] || '').trim();
+const SIZES = sizesFromEnv
+  ? sizesFromEnv.split(',').map(s=>parseInt(s,10)).filter(n=>Number.isFinite(n) && n>0)
+  : [4096, 6144]; // default: phone + tablet
 
 async function* walk(dir){
   const ents = await fs.promises.readdir(dir, { withFileTypes: true });
@@ -40,6 +38,11 @@ async function ensureMobileFor(src){
     for (const MAX_DIM of SIZES){
       const dst = dstPathFor(src, MAX_DIM);
       await fs.promises.mkdir(path.dirname(dst), { recursive: true });
+      // Skip if up-to-date
+      try {
+        const [sSrc, sDst] = await Promise.all([fs.promises.stat(src), fs.promises.stat(dst)]);
+        if (+sDst.mtime >= +sSrc.mtime) continue;
+      } catch {}
       const scale = Math.min(1, MAX_DIM / Math.max(w, h));
       const pipe = sharp(src)
         .resize({ width: Math.round(w*scale), height: Math.round(h*scale), fit:'inside', withoutEnlargement: true, kernel: sharp.kernel.lanczos3 })
