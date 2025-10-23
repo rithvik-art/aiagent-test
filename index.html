@@ -29,13 +29,14 @@
 
       /* bottom-left bar (reduced opacity) */
       #bottomBar{
-        position:fixed; left:max(12px, env(safe-area-inset-left)); bottom:max(12px, env(safe-area-inset-bottom)); z-index:40;
+        position:fixed; left:max(12px, env(safe-area-inset-left)); bottom:max(12px, env(safe-area-inset-bottom)); z-index:100002;
         display:flex; gap:12px; align-items:center; flex-wrap:wrap;
         background: rgba(16,18,38,.55);
         border: 1px solid rgba(32,35,59,.55);
         border-radius:18px; padding:12px 14px;
         -webkit-backdrop-filter: blur(2px); backdrop-filter: blur(2px);
       }
+      body.fakefs #bottomBar{ z-index:100002 }
 
       /* Rotate overlay (phones portrait only) */
       #rotateOverlay{ position:fixed; inset:0; display:none; place-items:center; z-index:100000; background:rgba(0,0,0,.86); color:#fff; text-align:center; padding:24px; }
