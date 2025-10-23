@@ -11,7 +11,7 @@ import sharp from 'sharp';
 
 const ROOT = process.cwd();
 const EXPERIENCES = path.join(ROOT, 'public', 'experiences');
-const MAX_DIM = 4096;
+const SIZES = [4096, 6144]; // phone, tablet
 
 async function* walk(dir){
   const ents = await fs.promises.readdir(dir, { withFileTypes: true });
@@ -26,27 +26,36 @@ function isPano(file){
   return /[\\/]panos[\\/].+\.(?:webp|jpg|jpeg|png)$/i.test(file);
 }
 
-function dstPathFor(src){
-  return src.replace(/[\\/]panos[\\/]/i, path.sep + 'panos-mobile' + path.sep)
+function dstPathFor(src, size){
+  const dirName = size >= 6000 ? 'panos-mobile-6k' : (size >= 4096 ? 'panos-mobile' : `panos-${size}`);
+  return src.replace(/[\\/]panos[\\/]/i, path.sep + dirName + path.sep)
             .replace(/\.png$/i, '.jpg');
 }
 
 async function ensureMobileFor(src){
-  const dst = dstPathFor(src);
-  await fs.promises.mkdir(path.dirname(dst), { recursive: true });
   try {
     const meta = await sharp(src).metadata();
     const w = Number(meta.width)||0, h = Number(meta.height)||0;
-    const scale = Math.min(1, MAX_DIM / Math.max(w, h));
-    const pipe = sharp(src).resize({ width: Math.round(w*scale), height: Math.round(h*scale), fit:'inside', withoutEnlargement: true });
-    if (/\.webp$/i.test(src)){
-      await pipe.webp({ quality: 80 }).toFile(dst.replace(/\.jpg$/i, '.webp'));
-      return { dst: dst.replace(/\.jpg$/i, '.webp') };
+    let wrote = 0;
+    for (const MAX_DIM of SIZES){
+      const dst = dstPathFor(src, MAX_DIM);
+      await fs.promises.mkdir(path.dirname(dst), { recursive: true });
+      const scale = Math.min(1, MAX_DIM / Math.max(w, h));
+      const pipe = sharp(src)
+        .resize({ width: Math.round(w*scale), height: Math.round(h*scale), fit:'inside', withoutEnlargement: true, kernel: sharp.kernel.lanczos3 })
+        .sharpen(0.6);
+      if (/\.webp$/i.test(src)){
+        const out = dst.replace(/\.jpg$/i, '.webp');
+        await pipe.webp({ quality: 90, nearLossless: true, effort: 4, smartSubsample: true }).toFile(out);
+      } else {
+        await pipe.jpeg({ quality: 92, mozjpeg: true, progressive: true, chromaSubsampling: '4:4:4' }).toFile(dst);
+      }
+      wrote++;
     }
-    await pipe.jpeg({ quality: 85, progressive: true, mozjpeg: true }).toFile(dst);
-    return { dst };
+    return wrote;
   } catch (e) {
     console.error('[make-mobile] failed for', src, e?.message||e);
+    return 0;
   }
 }
 
@@ -55,9 +64,8 @@ async function ensureMobileFor(src){
   for await (const f of walk(EXPERIENCES)){
     if (!isPano(f)) continue;
     total++;
-    const out = await ensureMobileFor(f);
-    if (out) { process.stdout.write('.'); made++; }
+    const count = await ensureMobileFor(f);
+    if (count>0) { process.stdout.write('.'); made+=count; }
   }
-  console.log(`\n[mobile-panos] processed:${total} wrote:${made}`);
+  console.log(`\n[mobile-panos] processed:${total} files, variants written:${made}`);
 })().catch((e)=>{ console.error(e); process.exit(1); });
-
