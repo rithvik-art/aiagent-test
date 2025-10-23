@@ -12,6 +12,10 @@ export default defineConfig({
       modernPolyfills: true,
     }),
   ],
+  css: {
+    // Force a minimal PostCSS config so Vite doesn't search for JSON configs
+    postcss: { plugins: [] }
+  },
   server: {
     https: true,        // enable HTTPS
     host: true,         // 0.0.0.0 (LAN access)
