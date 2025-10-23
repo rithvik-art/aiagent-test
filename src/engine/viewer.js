@@ -45,6 +45,9 @@ export async function initViewer({ roomId = "demo", exp, experienceId, experienc
   const currentMeta = () => metaById.get(expSlug()) || {};
   const isStereo = () => Boolean(currentMeta().stereo);
   const panoUrl = (f) => `${BASE}/panos/${chooseFile(f)}`.replace(/\/{2,}/g, "/");
+  // UA flags (used for iOS memory-safe behavior)
+  const UA = (navigator.userAgent || "").toLowerCase();
+  const IS_IOS = /iphone|ipad|ipod|ios/.test(UA);
   /* Engine / Scene */
   const canvas = document.getElementById("renderCanvas");
   const engine = new Engine(canvas, true);
@@ -55,13 +58,17 @@ export async function initViewer({ roomId = "demo", exp, experienceId, experienc
       const forceHQ = (qs.get('hq') === '1') || (String(import.meta?.env?.VITE_FORCE_HQ||'')==='1') || ((qs.get('q')||'').toLowerCase()==='high');
       const dpr = Math.max(1, window.devicePixelRatio || 1);
       const cap = forceHQ ? 3 : 2;
-      return Math.min(cap, dpr);
+      // iOS tends to crash with high DPR + huge textures; keep DPR conservative
+      const target = Math.min(cap, dpr);
+      return IS_IOS ? Math.min(1.2, target) : target;
     }
     engine.setHardwareScalingLevel(1 / determineDpr());
   } catch {}
 
   function getQuality() {
     try {
+      // Safer defaults for iPhones (lower memory pressure)
+      if (IS_IOS) return { mips: false, sampling: Texture.BILINEAR_SAMPLINGMODE, aniso: 1 };
       const qs = new URLSearchParams(location.search);
       const override = (qs.get('q') || import.meta?.env?.VITE_QUALITY || 'auto').toLowerCase();
       if (override === 'high') return { mips: true, sampling: Texture.TRILINEAR_SAMPLINGMODE, aniso: 8 };
@@ -185,7 +192,7 @@ export async function initViewer({ roomId = "demo", exp, experienceId, experienc
   // LRU texture cache to prevent unbounded GPU memory growth
   const texCache = new Map();
   const inFlight = new Map();
-  const TEX_LIMIT = (()=>{ try{ const ua=(navigator.userAgent||'').toLowerCase(); if(/iphone|ipad|ipod|ios/.test(ua)) return 8; if(/android/.test(ua)) return 10; return 16; }catch{ return 16; } })();
+  const TEX_LIMIT = (()=>{ try{ const ua=(navigator.userAgent||'').toLowerCase(); if(/iphone|ipad|ipod|ios/.test(ua)) return 2; if(/android/.test(ua)) return 8; return 16; }catch{ return 16; } })();
   function touchLRU(key){ if(!texCache.has(key)) return; const v=texCache.get(key); texCache.delete(key); texCache.set(key,v); }
   function evictIfNeeded(curKey){
     try{
@@ -207,7 +214,7 @@ export async function initViewer({ roomId = "demo", exp, experienceId, experienc
   }
   function retainSW(urls){ try{ navigator.serviceWorker?.controller?.postMessage({ type:'retain', urls }); }catch{} }
 
-  function neighborInfoFor(n, limit = 2){
+  function neighborInfoFor(n, limit = (IS_IOS ? 0 : 2)){
     const out = { files: [], keys: [], urls: [] };
     try{
       const hs = Array.isArray(n?.hotspots) ? n.hotspots : [];
