@@ -52,7 +52,13 @@ export async function initViewer({ roomId = "demo", exp, experienceId, experienc
   const IS_IOS = /iphone|ipad|ipod|ios/.test(UA);
   /* Engine / Scene */
   const canvas = document.getElementById("renderCanvas");
-  const engine = new Engine(canvas, true);
+  const engine = new Engine(canvas, true, {
+    disableWebGL2Support: true,
+    powerPreference: 'low-power',
+    premultipliedAlpha: false,
+    preserveDrawingBuffer: false,
+    stencil: false
+  });
   try {
     // Force HQ on request; otherwise cap to 2x for perf
     function determineDpr(){
