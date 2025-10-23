@@ -36,6 +36,8 @@
         border-radius:18px; padding:12px 14px;
         -webkit-backdrop-filter: blur(2px); backdrop-filter: blur(2px);
       }
+      /* Hide bottom bar unless Guide mode is active */
+      body:not([data-role="guide"]) #bottomBar{ display:none !important }
       body.fakefs #bottomBar{ z-index:100002 }
 
       /* Rotate overlay (phones portrait only) */

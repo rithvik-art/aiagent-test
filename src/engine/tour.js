@@ -48,6 +48,8 @@ export function createTourController({ api, tourId = 'default', onEvent } = {}) 
   let curAudio = null; let curObjectUrl = '';
   let plan = [];
   let zoneNameById = new Map();
+  // Track last node we advanced to in order to avoid duplicate step triggers
+  let lastAppliedNodeId = null;
   const SHORT_CUE_ENABLED = (import.meta?.env?.VITE_TOUR_NEXT_VIEW_CUE || '1') !== '0';
 
   function emit(type, detail = {}) { try { onEvent?.({ type, ...detail }); } catch {} }
@@ -96,6 +98,7 @@ export function createTourController({ api, tourId = 'default', onEvent } = {}) 
   async function goToStep(i) {
     index = i; const s = plan[index] || steps[index];
     if (!s) return complete();
+    lastAppliedNodeId = s?.nodeId || null;
     // experience switch
     if (s.exp && typeof api?.switchExperience === 'function') {
       await api.switchExperience(s.exp);
@@ -172,7 +175,7 @@ export function createTourController({ api, tourId = 'default', onEvent } = {}) 
     isPlaying: () => playing,
     getIndex: () => index,
     getSteps: () => (plan.length? plan.slice() : steps.slice()),
-    jumpToNode: async (nodeId) => { try{ const arr = (plan.length? plan : steps); const idx = arr.findIndex(s=>s?.nodeId===nodeId); if(idx>=0){ clearTimer(); stopNarration(); playing = true; await goToStep(idx); } }catch{} },
+    jumpToNode: async (nodeId) => { try{ if (nodeId && nodeId===lastAppliedNodeId) return; const arr = (plan.length? plan : steps); const idx = arr.findIndex(s=>s?.nodeId===nodeId); if(idx>=0 && idx!==index){ clearTimer(); stopNarration(); playing = true; await goToStep(idx); } }catch{} },
   };
 }
 
@@ -181,6 +184,8 @@ try {
   addEventListener('agent:navigate', (ev)=>{
     const d = ev?.detail || {}; const tour = (window && window.__tour) ? window.__tour : null;
     if (!tour || !tour.isPlaying || !tour.isPlaying()) return;
+    // Ignore programmatic moves triggered by the tour itself; only react to user-driven navigation
+    if (d?.source && String(d.source).toLowerCase() !== 'user') return;
     try{
       tour.jumpToNode?.(d.nodeId);
     }catch{}
