@@ -204,6 +204,13 @@ export async function initViewer({ roomId = "demo", exp, experienceId, experienc
   let activeMat = 0; const mats=[domeMat,domeMat2]; const domes=[dome,dome2];
   async function crossfadeToTexture(tex, durMs=200){
     mapFor2D(tex, isStereo());
+    // On iOS, avoid double-buffer crossfade to reduce peak memory
+    if (IS_IOS) {
+      try { domeMat.emissiveTexture = tex; domeMat.alpha = 1.0; } catch {}
+      try { dome.setEnabled(true); dome2.setEnabled(false); } catch {}
+      activeMat = 0;
+      return;
+    }
     const from=mats[activeMat]; const to=mats[1-activeMat];
     to.emissiveTexture = tex; to.alpha = 0.0; domes[0].setEnabled(true); domes[1].setEnabled(true);
     let t0=performance.now();
