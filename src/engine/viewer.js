@@ -115,9 +115,15 @@ export async function initViewer({ roomId = "demo", exp, experienceId, experienc
       if (!shouldPrefer) return;
       const startFile = (nodesById?.get?.(currentNodeId)?.file) || '';
       if (!startFile) { PANOS_DIR = 'panos'; return; }
-      const probe = `${BASE}/panos-mobile/${chooseFile(startFile)}`.replace(/\/{2,}/g, '/');
-      const r = await fetch(probe, { method: 'HEAD', cache: 'no-cache' });
-      if (r.ok) { PANOS_DIR = 'panos-mobile'; }
+      // Prefer 6K variant on larger iPads where available
+      const probe6k = `${BASE}/panos-mobile-6k/${chooseFile(startFile)}`.replace(/\/{2,}/g, '/');
+      const probe4k = `${BASE}/panos-mobile/${chooseFile(startFile)}`.replace(/\/{2,}/g, '/');
+      if (maxTex >= 6144) {
+        const r6 = await fetch(probe6k, { method: 'HEAD', cache: 'no-cache' });
+        if (r6.ok) { PANOS_DIR = 'panos-mobile-6k'; return; }
+      }
+      const r4 = await fetch(probe4k, { method: 'HEAD', cache: 'no-cache' });
+      if (r4.ok) { PANOS_DIR = 'panos-mobile'; }
     } catch { /* no-op: keep default */ }
   }
   await maybeUseMobilePanos();
