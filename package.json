@@ -10,7 +10,7 @@
                     "preview":  "vite preview",
                     "generate:manifest":  "node ./scripts/generate-experience-manifest.mjs",
                     "predev":  "npm run generate:manifest",
-                    "prebuild":  " npm run generate:manifest \u0026\u0026 npm run make:fallbacks",
+                    "prebuild":  " npm run generate:manifest \u0026\u0026 npm run make:fallbacks \u0026\u0026 npm run make:mobile",
                     "prepreview":  "npm run generate:manifest",
                     "make:fallbacks":  "node ./scripts/make-jpeg-fallbacks.mjs",
                     "make:mobile": "node ./scripts/make-mobile-panos.mjs"
