@@ -3,9 +3,11 @@ import { defineConfig } from "vite";
 import basicSsl from "@vitejs/plugin-basic-ssl";
 import legacy from "@vitejs/plugin-legacy";
 
+const useHttps = (process.env.DEV_HTTPS ?? '1') !== '0' && (process.env.DEV_HTTPS ?? '1') !== 'false';
+
 export default defineConfig({
   plugins: [
-    basicSsl(),
+    ...(useHttps ? [basicSsl()] : []),
     legacy({
       targets: ["defaults", "not IE 11", "iOS >= 12", "Safari >= 12"],
       renderLegacyChunks: true,
@@ -17,7 +19,7 @@ export default defineConfig({
     postcss: { plugins: [] }
   },
   server: {
-    https: true,        // enable HTTPS
+    https: useHttps,        // enable HTTPS only when DEV_HTTPS != 0
     host: true,         // 0.0.0.0 (LAN access)
     port: 5173,
     strictPort: true
