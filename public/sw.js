@@ -1,7 +1,8 @@
 // sw.js — cache-first pano fetch with bounded size (no runaway memory)
 const VERSION = "v8";
 const CACHE   = `pano-cache-${VERSION}`;
-const PANO_RE = /\/panos\/.+\.(jpg|jpeg|png|webp)$/i;
+// Cache pano and voice assets
+const PANO_RE = /\/(panos|voice)\/.+\.(jpg|jpeg|png|webp|mp3|m4a|wav)$/i;
 const MAX_ENTRIES = 100;
 
 self.addEventListener("install", () => self.skipWaiting());
@@ -31,6 +32,11 @@ self.addEventListener("fetch", (event) => {
   if (request.method !== "GET") return;
   const url = new URL(request.url);
   if (!PANO_RE.test(url.pathname)) return;
+  // Bypass cache if nocache=1 query is present
+  if (url.searchParams.get('nocache') === '1') {
+    event.respondWith(fetch(request, { cache: 'no-store' }));
+    return;
+  }
 
   // Cache-first, background refresh
   event.respondWith((async () => {
@@ -60,21 +66,39 @@ self.addEventListener("fetch", (event) => {
 
 self.addEventListener("message", (event) => {
   const { type, urls } = event.data || {};
-  if (type !== "precache" || !Array.isArray(urls) || urls.length === 0) return;
-
-  event.waitUntil((async () => {
-    const cache = await caches.open(CACHE);
-    for (const u of urls) {
-      try {
-        const req = new Request(u, { credentials: "same-origin", cache: "no-cache" });
-        const hit = await cache.match(req);
-        if (!hit) {
-          const resp = await fetch(req);
-          if (resp && resp.ok) await cache.put(req, resp.clone());
-        }
-      } catch {}
-    }
-    trimCache(cache).catch(() => {});
-  })());
+  if (type === 'precache'){
+    if (!Array.isArray(urls) || urls.length === 0) return;
+    event.waitUntil((async () => {
+      const cache = await caches.open(CACHE);
+      for (const u of urls) {
+        try {
+          const req = new Request(u, { credentials: "same-origin", cache: "no-cache" });
+          const hit = await cache.match(req);
+          if (!hit) {
+            const resp = await fetch(req);
+            if (resp && resp.ok) await cache.put(req, resp.clone());
+          }
+        } catch {}
+      }
+      trimCache(cache).catch(() => {});
+    })());
+    return;
+  }
+  if (type === 'retain'){
+    if (!Array.isArray(urls)) return;
+    const keep = new Set(urls);
+    event.waitUntil((async()=>{
+      const cache = await caches.open(CACHE);
+      const keys = await cache.keys();
+      for (const req of keys){ if (!keep.has(req.url)) await cache.delete(req); }
+    })());
+    return;
+  }
+  if (type === 'flush'){
+    event.waitUntil((async()=>{
+      const names = await caches.keys();
+      await Promise.all(names.map(n=> n.startsWith('pano-cache-') ? caches.delete(n) : Promise.resolve()));
+    })());
+  }
 });
 

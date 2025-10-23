@@ -1,0 +1,14 @@
+{
+  "id": "default",
+  "durationTargetSec": 360,
+  "steps": [
+    { "exp": "office", "zoneId": "Entrance", "dwellSec": 35, "narration": { "text": "Welcome to the office. We begin at the entrance." } },
+    { "exp": "office", "zoneId": "Reception", "dwellSec": 35, "narration": { "text": "This is the reception area where guests are welcomed." } },
+    { "exp": "office", "zoneId": "Cafetaria", "dwellSec": 35, "narration": { "text": "The cafeteria provides a bright, casual space for breaks." } },
+    { "exp": "office", "zoneId": "Meeting Rooms", "dwellSec": 40, "narration": { "text": "A range of meeting rooms support collaborative work." } },
+    { "exp": "office", "zoneId": "A.V. Room", "dwellSec": 35, "narration": { "text": "The AV room is equipped for presentations and training." } },
+    { "exp": "office", "zoneId": "Board room and Office", "dwellSec": 40, "narration": { "text": "Here is the board room and adjacent office spaces." } },
+    { "exp": "office", "zoneId": "Courtyard", "dwellSec": 40, "narration": { "text": "Finally, the courtyard brings natural light into the workspace." } }
+  ]
+}
+

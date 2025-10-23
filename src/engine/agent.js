@@ -46,7 +46,7 @@ function mapFor2D(tex, stereo, flipU){
   tex.vOffset = 1.0;
   tex.wrapU = Texture.CLAMP_ADDRESSMODE;
   tex.wrapV = Texture.CLAMP_ADDRESSMODE;
-  try { tex.anisotropicFilteringLevel = 8; } catch {}
+  // aniso set when texture is created based on quality profile
 }
 
 function createMetaLookup(list = []){
@@ -75,13 +75,32 @@ export async function initAgent(opts = {}){
   const canvas = document.getElementById("renderCanvas");
   const engine = new Engine(canvas, true);
   try{
-    // Adaptive resolution to reduce mobile GPU pressure
-    const ua = (navigator.userAgent||"").toLowerCase();
-    const isiOS = /iphone|ipad|ipod|ios/.test(ua);
-    const isAndroid = /android/.test(ua);
-    const scale = isiOS ? 1.5 : (isAndroid ? 1.3 : 1.0);
-    engine.setHardwareScalingLevel(scale);
+    // Force HQ on request; otherwise cap to 2x for perf
+    function determineDpr(){
+      const qs = new URLSearchParams(location.search);
+      const forceHQ = (qs.get('hq') === '1') || (String(import.meta?.env?.VITE_FORCE_HQ||'')==='1') || ((qs.get('q')||'').toLowerCase()==='high');
+      const dpr = Math.max(1, window.devicePixelRatio || 1);
+      const cap = forceHQ ? 3 : 2;
+      return Math.min(cap, dpr);
+    }
+    engine.setHardwareScalingLevel(1 / determineDpr());
   }catch{}
+
+  function getQuality(){
+    try{
+      const qs = new URLSearchParams(location.search);
+      const override = (qs.get('q') || import.meta?.env?.VITE_QUALITY || 'auto').toLowerCase();
+      if (override==='high') return { mips:true, sampling:Texture.TRILINEAR_SAMPLINGMODE, aniso:8 };
+      if (override==='low')  return { mips:false, sampling:Texture.BILINEAR_SAMPLINGMODE, aniso:1 };
+      const conn = navigator.connection || navigator.webkitConnection || navigator.mozConnection;
+      const eff = String(conn?.effectiveType||'').toLowerCase();
+      const save = Boolean(conn?.saveData);
+      const slow = /^(slow-)?2g|3g$/.test(eff) || save;
+      const mem = Number(navigator.deviceMemory || 4);
+      if (slow || mem <= 2) return { mips:false, sampling:Texture.BILINEAR_SAMPLINGMODE, aniso:1 };
+      return { mips:true, sampling:Texture.TRILINEAR_SAMPLINGMODE, aniso:8 };
+    }catch{ return { mips:true, sampling:Texture.TRILINEAR_SAMPLINGMODE, aniso:8 }; }
+  }
   const scene  = new Scene(engine);
   scene.clearColor = new Color4(0,0,0,1);
 
@@ -123,10 +142,9 @@ export async function initAgent(opts = {}){
   dome.material=domeMat; dome.renderingGroupId=0;
 
   /* textures */
-  const NO_MIPS=true, SAMPLE=Texture.BILINEAR_SAMPLINGMODE;
   // LRU texture cache to prevent unbounded GPU memory growth on mobile
   const texCache=new Map(), inFlight=new Map();
-  const TEX_LIMIT = 16; // keep last 16 panos per experience
+  const TEX_LIMIT = (function(){ try{ const ua=(navigator.userAgent||'').toLowerCase(); if(/iphone|ipad|ipod|ios/.test(ua)) return 8; if(/android/.test(ua)) return 10; return 16; }catch{ return 16; } })(); // fewer on mobile
   function touchLRU(key){
     if (!texCache.has(key)) return;
     const val = texCache.get(key);
@@ -144,7 +162,42 @@ export async function initAgent(opts = {}){
       }
     }catch{}
   }
-  function makeTexture(file){ return new Texture(panoUrl(file), scene, NO_MIPS, false, SAMPLE); }
+  function purgeTextures(){
+    try{
+      for (const [k,tex] of texCache.entries()){ try{ tex?.dispose?.(); }catch{} }
+      texCache.clear();
+    }catch{}
+  }
+  function retainOnly(keep){
+    try{
+      for (const [k, tex] of texCache.entries()){
+        if (!keep.has(k)) { try{ tex?.dispose?.(); }catch{} texCache.delete(k); }
+      }
+    }catch{}
+  }
+  function retainSW(urls){ try{ const abs=(urls||[]).map(u=>{ try{ return new URL(u, location.origin).href; }catch{ return u; } }); navigator.serviceWorker?.controller?.postMessage({ type:'retain', urls: abs }); }catch{} }
+  function neighborInfoFor(n, limit=2){
+    const out={ files:[], keys:[], urls:[] };
+    try{
+      const hs=Array.isArray(n?.hotspots)? n.hotspots : [];
+      for (const h of hs){
+        if (!h?.to || !nodesById.has(h.to)) continue;
+        const f = nodesById.get(h.to).file; if(!f || out.files.includes(f)) continue;
+        out.files.push(f); out.keys.push(BASE+"|"+f); out.urls.push(panoUrl(f));
+        if (out.files.length>=limit) break;
+      }
+    }catch{}
+    return out;
+  }
+  function retainOnly(keep){
+    try{
+      for (const [k, tex] of texCache.entries()){
+        if (!keep.has(k)) { try{ tex?.dispose?.(); }catch{} texCache.delete(k); }
+      }
+    }catch{}
+  }
+  function retainSW(urls){ try{ navigator.serviceWorker?.controller?.postMessage({ type:'retain', urls }); }catch{} }
+  function makeTexture(file){ const q=getQuality(); const tex = new Texture(panoUrl(file), scene, !q.mips, false, q.sampling); try{ tex.anisotropicFilteringLevel=q.aniso; }catch{} return tex; }
   function getTexture(file){
     const key=BASE+"|"+file;
     if (texCache.has(key)) { touchLRU(key); return Promise.resolve(texCache.get(key)); }
@@ -154,13 +207,41 @@ export async function initAgent(opts = {}){
     inFlight.set(key,p); p.finally(()=>inFlight.delete(key));
     return p;
   }
+  let lastMainFile = null;
   async function showFile(file){
     // DON'T show loading overlay - causes black screens
     const tex = await getTexture(file);
     // CORRECT: In 2D, CROP stereo (bottom half only for mono view)
     mapFor2D(tex, /*stereo*/ isStereo(), FLIP_U);
     domeMat.emissiveTexture = tex;
+    try{
+      const currentMainKey = BASE + "|" + file;
+      const keep = new Set([currentMainKey]);
+      const urls = [panoUrl(file)];
+      // retain previous pano
+      try{
+        if (typeof lastMainFile === 'string' && lastMainFile && lastMainFile !== file){
+          keep.add(BASE + "|" + lastMainFile);
+          urls.push(panoUrl(lastMainFile));
+        }
+      }catch{}
+      if (typeof mirrorTexKey === 'string' && mirrorTexKey) keep.add(mirrorTexKey);
+      const curNode = nodesById.get(currentNodeId);
+      const neigh = neighborInfoFor(curNode, 2);
+      neigh.files.forEach(f=>{ try{ getTexture(f).catch(()=>{}); }catch{} });
+      neigh.keys.forEach(k=>keep.add(k));
+      urls.push(...neigh.urls);
+      retainOnly(keep);
+      retainSW(urls);
+      try{ lastMainFile = file; }catch{}
+    }catch{}
   }
+
+  // Release GPU memory when tab is hidden/backgrounded (mobile stability)
+  try{
+    document.addEventListener('visibilitychange', ()=>{ if (document.visibilityState !== 'visible') purgeTextures(); });
+    addEventListener('pagehide', ()=>purgeTextures());
+  }catch{}
 
   /* hotspots */
   const hotspotRoot = new TransformNode("hotspots", scene); hotspotRoot.parent=dome; hotspotRoot.layerMask=0x1;
@@ -294,6 +375,7 @@ export async function initAgent(opts = {}){
     if (!(targetId && targetId!==currentNodeId)) return Promise.resolve();
     const node=nodesById.get(targetId); if(!node) return Promise.resolve();
     navLock=true; currentNodeId=node.id;
+    try { dispatchEvent(new CustomEvent('agent:navigate', { detail: { nodeId: currentNodeId, source: (broadcast?'user':'program') } })); } catch {}
     const fid=node.floorId; mini?.setActiveFloor(fid,true,true);
     // Render one marker per zone when zones are present
     const hasZones = Array.isArray(data?.zones) && data.zones.length > 0;
@@ -346,7 +428,7 @@ export async function initAgent(opts = {}){
   mirrorDome.material = mirrorMat;
 
   let mirrorNodeId=null, mirrorTexKey=null;
-  async function setMirrorNode(id){ if (!id || id===mirrorNodeId || !nodesById.has(id)) return; const file = nodesById.get(id).file, key = BASE + "|" + file; if (mirrorTexKey === key) { mirrorNodeId = id; return; } const tex = await getTexture(file); mirrorMat.emissiveTexture = tex; mapFor2D(tex, /*stereo*/ isStereo(), FLIP_U); mirrorTexKey = key; mirrorNodeId = id; }
+  async function setMirrorNode(id){ if (!id || id===mirrorNodeId || !nodesById.has(id)) return; const file = nodesById.get(id).file, key = BASE + "|" + file; if (mirrorTexKey === key) { mirrorNodeId = id; return; } const tex = await getTexture(file); mirrorMat.emissiveTexture = tex; mapFor2D(tex, /*stereo*/ isStereo(), FLIP_U); mirrorTexKey = key; mirrorNodeId = id; try{ const keep = new Set([key]); retainOnly(keep); retainSW([panoUrl(file)]); }catch{} }
 
   /* WebSocket (guide + viewers) */
   let socket=null; let wsIndex=0; let wsLockedIdx=-1;

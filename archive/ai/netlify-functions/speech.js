@@ -22,7 +22,7 @@ exports.handler = async (event) => {
       body: JSON.stringify({ model, voice, input, format: 'mp3' })
     });
     if (!res.ok) {
-      const t = await res.text().catch(()=>'');
+      const t = await res.text().catch(()=> '');
       return { statusCode: res.status, headers: corsHeaders(), body: JSON.stringify({ error: 'tts failed', detail: t }) };
     }
     const arrayBuf = await res.arrayBuffer();

@@ -49,13 +49,32 @@ export async function initViewer({ roomId = "demo", exp, experienceId, experienc
   const canvas = document.getElementById("renderCanvas");
   const engine = new Engine(canvas, true);
   try {
-    // Adaptive resolution to reduce mobile GPU pressure
-    const ua = (navigator.userAgent||"").toLowerCase();
-    const isiOS = /iphone|ipad|ipod|ios/.test(ua);
-    const isAndroid = /android/.test(ua);
-    const scale = isiOS ? 1.5 : (isAndroid ? 1.3 : 1.0);
-    engine.setHardwareScalingLevel(scale);
+    // Force HQ on request; otherwise cap to 2x for perf
+    function determineDpr(){
+      const qs = new URLSearchParams(location.search);
+      const forceHQ = (qs.get('hq') === '1') || (String(import.meta?.env?.VITE_FORCE_HQ||'')==='1') || ((qs.get('q')||'').toLowerCase()==='high');
+      const dpr = Math.max(1, window.devicePixelRatio || 1);
+      const cap = forceHQ ? 3 : 2;
+      return Math.min(cap, dpr);
+    }
+    engine.setHardwareScalingLevel(1 / determineDpr());
   } catch {}
+
+  function getQuality() {
+    try {
+      const qs = new URLSearchParams(location.search);
+      const override = (qs.get('q') || import.meta?.env?.VITE_QUALITY || 'auto').toLowerCase();
+      if (override === 'high') return { mips: true, sampling: Texture.TRILINEAR_SAMPLINGMODE, aniso: 8 };
+      if (override === 'low')  return { mips: false, sampling: Texture.BILINEAR_SAMPLINGMODE, aniso: 1 };
+      const conn = navigator.connection || navigator.webkitConnection || navigator.mozConnection;
+      const eff = String(conn?.effectiveType || '').toLowerCase();
+      const save = Boolean(conn?.saveData);
+      const slow = /^(slow-)?2g|3g$/.test(eff) || save;
+      const mem = Number(navigator.deviceMemory || 4);
+      if (slow || mem <= 2) return { mips: false, sampling: Texture.BILINEAR_SAMPLINGMODE, aniso: 1 };
+      return { mips: true, sampling: Texture.TRILINEAR_SAMPLINGMODE, aniso: 8 };
+    } catch { return { mips: true, sampling: Texture.TRILINEAR_SAMPLINGMODE, aniso: 8 }; }
+  }
   const scene = new Scene(engine);
   scene.clearColor = new Color4(0, 0, 0, 1);
 
@@ -166,7 +185,7 @@ export async function initViewer({ roomId = "demo", exp, experienceId, experienc
   // LRU texture cache to prevent unbounded GPU memory growth
   const texCache = new Map();
   const inFlight = new Map();
-  const TEX_LIMIT = 16;
+  const TEX_LIMIT = (()=>{ try{ const ua=(navigator.userAgent||'').toLowerCase(); if(/iphone|ipad|ipod|ios/.test(ua)) return 8; if(/android/.test(ua)) return 10; return 16; }catch{ return 16; } })();
   function touchLRU(key){ if(!texCache.has(key)) return; const v=texCache.get(key); texCache.delete(key); texCache.set(key,v); }
   function evictIfNeeded(curKey){
     try{
@@ -179,11 +198,49 @@ export async function initViewer({ roomId = "demo", exp, experienceId, experienc
       }
     }catch{}
   }
+  function retainOnly(keep){
+    try{
+      for (const [k, tex] of texCache.entries()){
+        if (!keep.has(k)) { try{ tex?.dispose?.(); }catch{} texCache.delete(k); }
+      }
+    }catch{}
+  }
+  function retainSW(urls){ try{ navigator.serviceWorker?.controller?.postMessage({ type:'retain', urls }); }catch{} }
+
+  function neighborInfoFor(n, limit = 2){
+    const out = { files: [], keys: [], urls: [] };
+    try{
+      const hs = Array.isArray(n?.hotspots) ? n.hotspots : [];
+      for (const h of hs){
+        if (!h?.to || !nodesById.has(h.to)) continue;
+        const f = nodesById.get(h.to).file;
+        if (!f || out.files.includes(f)) continue;
+        out.files.push(f);
+        out.keys.push(`${BASE}|${f}`);
+        out.urls.push(panoUrl(f));
+        if (out.files.length >= limit) break;
+      }
+    }catch{}
+    return out;
+  }
+  function retainOnly(keep){
+    try{
+      for (const [k, tex] of texCache.entries()){
+        if (!keep.has(k)) { try{ tex?.dispose?.(); }catch{} texCache.delete(k); }
+      }
+    }catch{}
+  }
+  function retainSW(urls){ try{ navigator.serviceWorker?.controller?.postMessage({ type:'retain', urls }); }catch{} }
+  function purgeTextures(){
+    try{ for (const [k,tex] of texCache.entries()){ try{ tex?.dispose?.(); }catch{} } texCache.clear(); }catch{}
+  }
   async function getTexture(file) {
     const key = `${BASE}|${file}`;
     if (texCache.has(key)) { touchLRU(key); return texCache.get(key); }
     if (inFlight.has(key)) return inFlight.get(key);
-    const tex = new Texture(panoUrl(file), scene, true, false, Texture.BILINEAR_SAMPLINGMODE);
+    const q = getQuality();
+    const tex = new Texture(panoUrl(file), scene, !q.mips, false, q.sampling);
+    try { tex.anisotropicFilteringLevel = q.aniso; } catch {}
     const p = new Promise(res => { tex.isReady() ? res(tex) : tex.onLoadObservable.addOnce(()=>res(tex)); }).then((t)=>{ texCache.set(key,t); evictIfNeeded(key); return t; });
     inFlight.set(key, p);
     p.finally(()=>inFlight.delete(key));
@@ -199,8 +256,14 @@ export async function initViewer({ roomId = "demo", exp, experienceId, experienc
     tex.vOffset = 1.0;
     tex.wrapU = Texture.CLAMP_ADDRESSMODE;
     tex.wrapV = Texture.CLAMP_ADDRESSMODE;
-    tex.anisotropicFilteringLevel = 8;
+    // aniso set in getTexture()
   }
+
+  // Release GPU memory when tab is hidden/backgrounded (mobile stability)
+  try{
+    document.addEventListener('visibilitychange', ()=>{ if (document.visibilityState !== 'visible') purgeTextures(); });
+    addEventListener('pagehide', ()=>purgeTextures());
+  }catch{}
 
   // Apply initial orientation
   applyCam();
@@ -267,6 +330,7 @@ export async function initViewer({ roomId = "demo", exp, experienceId, experienc
     const curDome = vrDomes[activeVr];
     if (curDome) curDome.mesh.isVisible = false;
     activeVr = next;
+    try{ retainSW([url]); }catch{}
   }
   let lastLoadedFile = null; // Track last loaded file to prevent unnecessary reloads
   let loadInProgress = false; // Prevent concurrent loads
@@ -317,7 +381,21 @@ export async function initViewer({ roomId = "demo", exp, experienceId, experienc
         mapFor2D(tex, isStereo());
         domeMat.emissiveTexture = tex;
         dome.setEnabled(true);
+        // retention: current + previous + warm next neighbors
+        const prevKey = lastLoadedFile && lastLoadedFile!==node.file ? `${BASE}|${lastLoadedFile}` : null;
+        const prevFile = lastLoadedFile && lastLoadedFile!==node.file ? lastLoadedFile : null;
         lastLoadedFile = node.file; // Mark as loaded only if we applied it
+        const curKey = `${BASE}|${node.file}`;
+        const keep = new Set([curKey]);
+        const urls = [panoUrl(node.file)];
+        if (prevKey){ keep.add(prevKey); try{ if (prevFile) urls.push(panoUrl(prevFile)); }catch{} }
+        // Warm neighbors asynchronously; retain them as well
+        const neigh = neighborInfoFor(node, 2);
+        neigh.files.forEach(f=>{ try{ getTexture(f).catch(()=>{}); }catch{} });
+        neigh.keys.forEach(k=>keep.add(k));
+        urls.push(...neigh.urls);
+        retainOnly(keep);
+        retainSW(urls);
       }
     } catch (error) {
       console.error('[VIEWER] Failed to load panorama:', error);

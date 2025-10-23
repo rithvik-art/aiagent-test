@@ -22,6 +22,47 @@ const gateList = document.getElementById("gateExpList");
 const liveList = document.getElementById("expList");
 const overlay = document.getElementById("preloadOverlay");
 const barFill = document.getElementById("barFill");
+const exitFSBtn = document.getElementById("exitFSBtn");
+const rotateOverlay = document.getElementById("rotateOverlay");
+const tapStartBtn = document.getElementById("tapStart");
+
+const UA = (navigator.userAgent || "").toLowerCase();
+const IS_IOS = /iphone|ipad|ipod|ios/.test(UA);
+const IS_ANDROID = /android/.test(UA);
+const IS_MOBILE = /android|iphone|ipad|ipod|mobile|crios|fxios/.test(UA);
+let LAST_GESTURE_AT = 0;
+
+function updateHtmlFlags() {
+  try {
+    const el = document.documentElement;
+    const w = Math.max(window.innerWidth || 0, document.documentElement.clientWidth || 0);
+    const h = Math.max(window.innerHeight || 0, document.documentElement.clientHeight || 0);
+    const orient = (w >= h) ? 'landscape' : 'portrait';
+    el.setAttribute('data-orient', orient);
+    const device = IS_MOBILE ? (Math.min(w, h) <= 820 ? 'phone' : 'tablet') : 'desktop';
+    el.setAttribute('data-device', device);
+  } catch {}
+}
+
+function isFullscreenActive() {
+  const d = document;
+  return Boolean(d.fullscreenElement || d.webkitFullscreenElement || d.mozFullScreenElement || d.msFullscreenElement || document.body.classList.contains('fakefs'));
+}
+
+function updateFSButtonVisibility() {
+  try { if (exitFSBtn) exitFSBtn.style.display = isFullscreenActive() ? '' : 'none'; } catch {}
+}
+
+function attemptAutoFullscreenIfLandscape(){
+  try{
+    const el = document.documentElement;
+    const orient = el.getAttribute('data-orient') || '';
+    if (orient !== 'landscape') return;
+    const recently = (Date.now() - LAST_GESTURE_AT) < 60000; // 60s window
+    const allowed = recently || (sessionStorage.getItem('autoFs') === '1');
+    if (!isFullscreenActive() && allowed){ void enterFullscreenLandscape(); }
+  }catch{}
+}
 
 function showOverlay(){ if (overlay){ overlay.setAttribute('aria-busy','true'); } }
 function hideOverlay(){ if (overlay){ overlay.removeAttribute('aria-busy'); overlay.style.display='none'; } }
@@ -48,7 +89,12 @@ const btnFS = document.getElementById("btnFS");
 const btnVR = document.getElementById("btnVR");
 const btnMirror = document.getElementById("btnMirror");
 const btnMini = document.getElementById("btnMini");
-const btnAI = document.getElementById("btnAI");
+// Tour controls
+const tourStartBtn = document.getElementById('tourStart');
+const tourPauseBtn = document.getElementById('tourPause');
+const tourPrevBtn  = document.getElementById('tourPrev');
+const tourNextBtn  = document.getElementById('tourNext');
+const tourStopBtn  = document.getElementById('tourStop');
 
 const state = {
   manifest: [],
@@ -57,6 +103,7 @@ const state = {
   agentApi: null,
   setGateExp: null,
   setLiveExp: null,
+  tour: null,
 };
 
 const STEP_YAW = 0.06;
@@ -71,6 +118,7 @@ export async function enterFullscreenLandscape(){
     if (fsEl) {
       await (d.exitFullscreen?.() || d.webkitExitFullscreen?.() || d.mozCancelFullScreen?.() || d.msExitFullscreen?.());
       document.body.classList.remove('fakefs');
+      updateFSButtonVisibility();
       return;
     }
     if (target.requestFullscreen || target.webkitRequestFullscreen || target.mozRequestFullScreen || target.msRequestFullscreen) {
@@ -85,6 +133,7 @@ export async function enterFullscreenLandscape(){
   } catch (err) {
     document.body.classList.toggle('fakefs');
   }
+  updateFSButtonVisibility();
 }
 
 function getQS() {
@@ -279,11 +328,13 @@ async function preloadImagesStreaming(urls, onProgress, concurrency = 3) {
             // Decode image to ensure it can be displayed without jank later
             let objectUrl = '';
             try {
-              if ('createImageBitmap' in window && typeof createImageBitmap === 'function') {
+              // Avoid createImageBitmap on iOS to reduce memory spikes/leaks
+              if (!IS_IOS && 'createImageBitmap' in window && typeof createImageBitmap === 'function') {
                 await createImageBitmap(blob);
               } else {
                 await new Promise((res2, rej2) => {
                   const img = new Image();
+                  img.decoding = 'async';
                   img.onload = () => { try { URL.revokeObjectURL(objectUrl); } catch {} res2(); };
                   img.onerror = (e) => { try { URL.revokeObjectURL(objectUrl); } catch {} rej2(e); };
                   objectUrl = URL.createObjectURL(blob);
@@ -358,20 +409,21 @@ async function preloadExperience(expId) {
     }
   }, 300);
 
-  // Adaptive strategy for slow connections
+  // Adaptive strategy for slow connections and iOS memory constraints
   const { saveData, slow, isMobile } = getNetworkProfile();
   let mode = PRELOAD_MODE;
-  if (mode !== 'all' && mode !== 'stage') mode = (saveData || slow) ? 'stage' : 'all';
-  const stageCount = mode === 'all' ? files.length : (saveData || slow ? 1 : (isMobile ? 2 : 3));
+  if (mode !== 'all' && mode !== 'stage') mode = (saveData || slow || IS_IOS) ? 'stage' : 'all';
+  const stageCount = mode === 'all' ? files.length : (saveData || slow || IS_IOS ? 1 : (isMobile ? 2 : 3));
   const stageList = files.slice(0, Math.min(files.length, stageCount));
   const restList = files.slice(stageList.length);
 
-  await preloadImagesStreaming(stageList, onRawProgress, PRELOAD_CONCURRENCY);
+  const mobileConc = IS_IOS ? 1 : (IS_ANDROID ? Math.max(1, Math.min(PRELOAD_CONCURRENCY, 2)) : PRELOAD_CONCURRENCY);
+  await preloadImagesStreaming(stageList, onRawProgress, mobileConc);
   if (mode === 'all' && restList.length) {
-    await preloadImagesStreaming(restList, onRawProgress, Math.max(1, PRELOAD_CONCURRENCY - 1));
+    await preloadImagesStreaming(restList, onRawProgress, Math.max(1, mobileConc));
   } else if (restList.length) {
     // Background warm cache of remaining panos; no need to await
-    preloadImagesStreaming(restList, () => {}, 2).catch(()=>{});
+    preloadImagesStreaming(restList, () => {}, Math.max(1, Math.min(2, mobileConc))).catch(()=>{});
   }
 
   // Finish bar to 100% (engine init will hide overlay after first frame)
@@ -420,6 +472,7 @@ function getSelectedExperience() {
 async function startGuide() {
   const { id } = getSelectedExperience();
   syncActiveExperience(id, { syncGate: true, syncLive: true });
+  try{ document.body.setAttribute('data-role','guide'); }catch{}
   // Use stub to avoid breaking dev if agent.js is unavailable
   const importPromise = import("./engine/agent.js");
   // Attempt fullscreen + landscape early (user gesture)
@@ -428,11 +481,17 @@ async function startGuide() {
 
   const roomId = roomInput?.value?.trim() || "demo";
   gate?.remove();
-  if (bottomBar) bottomBar.hidden = false;
+  if (bottomBar) { bottomBar.hidden = false; bottomBar.style.display = 'flex'; }
   
   // Engine chunk + init; overlay remains visible from preload until we're fully ready
   const { initAgent } = await importPromise;
   state.agentApi = await initAgent({ roomId, exp: id, experiencesMeta: state.manifest });
+  // Build tour controller lazily
+  try {
+    const { createTourController } = await import('./engine/tour.js');
+    state.tour = createTourController({ api: state.agentApi, tourId: (import.meta?.env?.VITE_TOUR_ID || 'default') });
+    window.__tour = state.tour; // exposed for AI voice
+  } catch {}
   // If a persisted mirror pitch sign exists (for field calibration), apply it
   try {
     const savedPitch = Number(localStorage.getItem('mirrorPitchSign'));
@@ -450,6 +509,7 @@ async function startGuide() {
 async function startViewer() {
   const { id } = getSelectedExperience();
   syncActiveExperience(id, { syncGate: true, syncLive: true });
+  try{ document.body.setAttribute('data-role','viewer'); }catch{}
   const importPromise = import("./engine/viewer.js");
   // Attempt fullscreen + landscape early (user gesture)
   void enterFullscreenLandscape();
@@ -464,20 +524,6 @@ async function startViewer() {
   dispatchEvent(new CustomEvent('loading:hide'));
 }
 
-async function startAI() {
-  const { id } = getSelectedExperience();
-  syncActiveExperience(id, { syncGate: true, syncLive: true });
-  const importPromise = import("./engine/ai-agent.js");
-  // Attempt fullscreen + landscape early (user gesture)
-  void enterFullscreenLandscape();
-  await preloadExperience(id);
-  const roomId = roomInput?.value?.trim() || "demo";
-  gate?.remove();
-  if (bottomBar) bottomBar.hidden = false;
-  const { initAIAgent } = await importPromise;
-  state.agentApi = await initAIAgent({ roomId, exp: id, experiencesMeta: state.manifest });
-  dispatchEvent(new CustomEvent('loading:hide'));
-}
 
 async function onLiveExperienceChange() {
   const nextId = normaliseExpId(expSelectLive?.value);
@@ -491,6 +537,24 @@ async function onLiveExperienceChange() {
 }
 
 async function bootstrap() {
+  // Device/orientation flags + fullscreen button wiring
+  updateHtmlFlags();
+  addEventListener('resize', updateHtmlFlags);
+  addEventListener('orientationchange', updateHtmlFlags);
+  addEventListener('orientationchange', attemptAutoFullscreenIfLandscape);
+  addEventListener('resize', attemptAutoFullscreenIfLandscape);
+  addEventListener('pointerdown', ()=>{ LAST_GESTURE_AT = Date.now(); try{ sessionStorage.setItem('autoFs','1'); }catch{} });
+  document.addEventListener('fullscreenchange', updateFSButtonVisibility);
+  document.addEventListener('webkitfullscreenchange', updateFSButtonVisibility);
+  exitFSBtn?.addEventListener('click', async ()=>{
+    try {
+      const d=document; if (d.exitFullscreen) await d.exitFullscreen();
+      else if (d.webkitExitFullscreen) await d.webkitExitFullscreen();
+    } catch {}
+    document.body.classList.remove('fakefs');
+    updateFSButtonVisibility();
+  });
+
   // Enhance buttons: larger fullscreen icon and tooltips across controls
   const setTip = (el, text) => { if (el){ el.setAttribute('title', text); el.setAttribute('data-tip', text); } };
   try {
@@ -536,17 +600,37 @@ async function bootstrap() {
     }
   } catch {}
 
-  // auto-start by querystring
+  // auto-start by querystring (iOS needs a user gesture)
   const qs = getQS();
   const wantRole = (qs.get('role')||'').toLowerCase();
   const qsExp = qs.get('exp');
   const qsRoom = qs.get('room');
+  const flush = qs.get('flush') === '1';
   if (qsRoom) roomInput.value = qsRoom;
   if (qsExp && state.manifestById.has(qsExp)) {
     state.activeExpId = qsExp; state.setGateExp?.(qsExp,false); state.setLiveExp?.(qsExp,false);
   }
-  if (wantRole === 'viewer') { await startViewer(); return; }
-  if (wantRole === 'guide') { await startGuide(); return; }
+  // Ask SW (if active) to flush pano cache when requested
+  if (flush) { try { navigator.serviceWorker?.controller?.postMessage({ type:'flush' }); } catch {} }
+  if (wantRole === 'viewer' || wantRole === 'guide') {
+    const startFn = wantRole === 'viewer' ? startViewer : startGuide;
+    if (IS_IOS) {
+      try {
+        const orient = document.documentElement.getAttribute('data-orient') || '';
+        if (orient === 'portrait') {
+          if (rotateOverlay) rotateOverlay.style.display = 'grid';
+          if (tapStartBtn) {
+            tapStartBtn.style.display = 'inline-block';
+            tapStartBtn.onclick = async () => { try { await enterFullscreenLandscape(); } catch {} await startFn(); if (rotateOverlay) rotateOverlay.style.display='none'; };
+          }
+          // Defer actual start until user taps
+          return;
+        }
+      } catch {}
+    }
+    await startFn();
+    return;
+  }
 
   expSelect?.addEventListener("change", () => {
     const val = normaliseExpId(expSelect.value);
@@ -557,7 +641,6 @@ async function bootstrap() {
   expSelectLive?.addEventListener("change", () => onLiveExperienceChange().catch(console.error));
   btnGuide?.addEventListener("click", () => startGuide().catch(console.error));
   btnViewer?.addEventListener("click", () => startViewer().catch(console.error));
-  btnAI?.addEventListener("click", () => startAI().catch(console.error));
 
   holdRepeat(btnLeft, () => state.agentApi?.nudgeYaw?.(-STEP_YAW));
   holdRepeat(btnRight, () => state.agentApi?.nudgeYaw?.(STEP_YAW));
@@ -593,6 +676,34 @@ async function bootstrap() {
   // Fullscreen with iOS-friendly behavior
   btnFullscreen?.addEventListener("click", enterFullscreenLandscape);
   btnFS?.addEventListener("click", enterFullscreenLandscape);
+
+  // Tour controls
+  function tourReady(){ return Boolean(state.tour); }
+  tourStartBtn?.addEventListener('click', async ()=>{
+    try {
+      if (!state.tour) {
+        const { createTourController } = await import('./engine/tour.js');
+        state.tour = createTourController({ api: state.agentApi, tourId: (import.meta?.env?.VITE_TOUR_ID || 'default') });
+        window.__tour = state.tour;
+      }
+      await state.tour.start();
+    } catch(e){ console.error('[tour] start failed', e); }
+  });
+  tourPauseBtn?.addEventListener('click', ()=>{ if(!tourReady()) return; try{ state.tour.isPlaying()? state.tour.pause() : state.tour.resume(); }catch{} });
+  tourPrevBtn?.addEventListener('click', ()=>{ if(tourReady()) try{ state.tour.prev(); }catch{} });
+  tourNextBtn?.addEventListener('click', ()=>{ if(tourReady()) try{ state.tour.next(); }catch{} });
+  tourStopBtn?.addEventListener('click', ()=>{ if(tourReady()) try{ state.tour.stop(); }catch{} });
+
+  // Keyboard shortcuts (when Agent running): Space toggles, Shift+Arrows step
+  window.addEventListener('keydown', (e)=>{
+    if (!state.agentApi || !state.tour) return;
+    if (e.code==='Space') { e.preventDefault(); try{ state.tour.isPlaying()? state.tour.pause() : state.tour.resume(); }catch{} }
+    if (e.shiftKey && e.key==='ArrowLeft') { e.preventDefault(); try{ state.tour.prev(); }catch{} }
+    if (e.shiftKey && e.key==='ArrowRight'){ e.preventDefault(); try{ state.tour.next(); }catch{} }
+    if (e.key==='Escape'){ try{ state.tour.stop(); }catch{} }
+  }, { passive:false });
+
+  updateFSButtonVisibility();
 
   window.addEventListener("keydown", (event) => {
     if (!state.agentApi) return;
