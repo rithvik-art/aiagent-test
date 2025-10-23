@@ -44,7 +44,9 @@ export async function initViewer({ roomId = "demo", exp, experienceId, experienc
   const expSlug = () => expPath.split("/").filter(Boolean).pop();
   const currentMeta = () => metaById.get(expSlug()) || {};
   const isStereo = () => Boolean(currentMeta().stereo);
-  const panoUrl = (f) => `${BASE}/panos/${chooseFile(f)}`.replace(/\/{2,}/g, "/");
+  // Pano directory may switch to a mobile-optimized folder on iOS
+  let PANOS_DIR = 'panos';
+  const panoUrl = (f) => `${BASE}/${PANOS_DIR}/${chooseFile(f)}`.replace(/\/{2,}/g, "/");
   // UA flags (used for iOS memory-safe behavior)
   const UA = (navigator.userAgent || "").toLowerCase();
   const IS_IOS = /iphone|ipad|ipod|ios/.test(UA);
@@ -98,6 +100,21 @@ export async function initViewer({ roomId = "demo", exp, experienceId, experienc
   ({ data, nodesById, startNodeId } = await loadWalkthrough(`${BASE}/walkthrough.json`));
   try{ window.dispatchEvent(new CustomEvent('loading:hide')); }catch{}
   let currentNodeId = startNodeId;
+
+  // If on iOS or small GPUs, try a mobile-optimized folder (panos-mobile) if present
+  async function maybeUseMobilePanos() {
+    try {
+      const maxTex = engine.getCaps()?.maxTextureSize || 4096;
+      const shouldPrefer = IS_IOS || maxTex < 8192;
+      if (!shouldPrefer) return;
+      const startFile = (nodesById?.get?.(currentNodeId)?.file) || '';
+      if (!startFile) { PANOS_DIR = 'panos'; return; }
+      const probe = `${BASE}/panos-mobile/${chooseFile(startFile)}`.replace(/\/{2,}/g, '/');
+      const r = await fetch(probe, { method: 'HEAD', cache: 'no-cache' });
+      if (r.ok) { PANOS_DIR = 'panos-mobile'; }
+    } catch { /* no-op: keep default */ }
+  }
+  await maybeUseMobilePanos();
 
   /* Floors -> world positions */
   const floorIndex = new Map();
