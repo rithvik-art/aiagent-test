@@ -1,0 +1,12 @@
+{
+  "duration": 5000,
+  "keyframes": [
+    { "t": 0,    "yaw": 0.00,  "pitch": 0.00,  "fov": 1.10 },
+    { "t": 5000, "yaw": 0.08,  "pitch": -0.02, "fov": 1.05 }
+  ],
+  "chips": [
+    { "id": "host",   "label": "Host Live Tour", "yaw": -0.30, "pitch": -0.05 },
+    { "id": "solo",   "label": "Explore Solo",   "yaw":  0.00, "pitch":  0.00 },
+    { "id": "invite", "label": "Invite Guests",   "yaw":  0.30, "pitch": -0.04 }
+  ]
+}

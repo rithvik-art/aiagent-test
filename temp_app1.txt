@@ -1,0 +1,250 @@
+// Lazy-load heavy engine modules only when needed
+// Note: dynamic imports create separate chunks and keep initial bundle light
+
+const BASE_URL = (import.meta?.env?.BASE_URL ?? "/");
+const BASE_TRIMMED = BASE_URL.endsWith("/") ? BASE_URL.slice(0, -1) : BASE_URL;
+const EXPERIENCES_ROOT = `${BASE_TRIMMED || ""}/experiences`.replace(/\/{2,}/g, "/");
+const EXPERIENCE_FALLBACK = [
+  { id: "skywalk", label: "Skywalk" },
+  { id: "flat", label: "Flat" },
+  { id: "amenities", label: "Amenities" },
+];
+// Preload configuration (tunable via Vite env)
+const PRELOAD_MODE = (import.meta?.env?.VITE_PRELOAD_MODE || 'auto').toLowerCase(); // 'auto' | 'all' | 'stage'
+const PRELOAD_CONCURRENCY = Math.max(1, Number(import.meta?.env?.VITE_PRELOAD_CONCURRENCY) || 3);
+
+const gate = document.getElementById("roleGate");
+const roomInput = document.getElementById("roomInput");
+const bottomBar = document.getElementById("bottomBar");
+const expSelect = document.getElementById("expSelect");
+const expSelectLive = document.getElementById("expSelectLive");
+const gateList = document.getElementById("gateExpList");
+const liveList = document.getElementById("expList");
+const overlay = document.getElementById("preloadOverlay");
+const barFill = document.getElementById("barFill");
+const exitFSBtn = document.getElementById("exitFSBtn");
+const rotateOverlay = document.getElementById("rotateOverlay");
+const tapStartBtn = document.getElementById("tapStart");
+
+const UA = (navigator.userAgent || "").toLowerCase();
+const IS_IOS = /iphone|ipad|ipod|ios/.test(UA);
+const IS_ANDROID = /android/.test(UA);
+const IS_MOBILE = /android|iphone|ipad|ipod|mobile|crios|fxios/.test(UA);
+let LAST_GESTURE_AT = 0;
+
+function updateHtmlFlags() {
+  try {
+    const el = document.documentElement;
+    const w = Math.max(window.innerWidth || 0, document.documentElement.clientWidth || 0);
+    const h = Math.max(window.innerHeight || 0, document.documentElement.clientHeight || 0);
+    const orient = (w >= h) ? 'landscape' : 'portrait';
+    el.setAttribute('data-orient', orient);
+    const device = IS_MOBILE ? (Math.min(w, h) <= 820 ? 'phone' : 'tablet') : 'desktop';
+    el.setAttribute('data-device', device);
+  } catch {}
+}
+
+function isFullscreenActive() {
+  const d = document;
+  return Boolean(d.fullscreenElement || d.webkitFullscreenElement || d.mozFullScreenElement || d.msFullscreenElement || document.body.classList.contains('fakefs'));
+}
+
+function updateFSButtonVisibility() {
+  try { if (exitFSBtn) exitFSBtn.style.display = isFullscreenActive() ? '' : 'none'; } catch {}
+}
+
+function attemptAutoFullscreenIfLandscape(){
+  try{
+    const el = document.documentElement;
+    const orient = el.getAttribute('data-orient') || '';
+    if (orient !== 'landscape') return;
+    const recently = (Date.now() - LAST_GESTURE_AT) < 60000; // 60s window
+    const allowed = recently || (sessionStorage.getItem('autoFs') === '1');
+    if (!isFullscreenActive() && allowed){ void enterFullscreenLandscape(); }
+  }catch{}
+}
+
+function showOverlay(){ if (overlay){ overlay.setAttribute('aria-busy','true'); } }
+function hideOverlay(){ if (overlay){ overlay.removeAttribute('aria-busy'); overlay.style.display='none'; } }
+function setProgress(p){ const pct = Math.max(0, Math.min(100, Math.round(p*100))); if (barFill) barFill.style.width = `${pct}%`; }
+
+// Listen for app-wide progress events from engine modules
+addEventListener('loading:show', ()=>{ showOverlay(); setProgress(0); });
+addEventListener('loading:progress', (ev)=>{ const d=ev?.detail||{}; setProgress(d.progress ?? 0); });
+addEventListener('loading:hide', ()=>{ hideOverlay(); });
+
+const btnGuide = document.getElementById("btnGuide");
+const btnViewer = document.getElementById("btnViewer");
+const btnUp = document.getElementById("btnUp");
+const btnDown = document.getElementById("btnDown");
+const btnLeft = document.getElementById("btnLeft");
+const btnRight = document.getElementById("btnRight");
+const btnZoomIn = document.getElementById("btnZoomIn");
+const btnZoomOut = document.getElementById("btnZoomOut");
+const btnFullscreen = document.getElementById("btnFullscreen");
+// Legacy IDs from previous project UI (kept for parity)
+const zoomInLegacy = document.getElementById("zoomIn");
+const zoomOutLegacy = document.getElementById("zoomOut");
+const btnFS = document.getElementById("btnFS");
+const btnVR = document.getElementById("btnVR");
+const btnMirror = document.getElementById("btnMirror");
+const btnMini = document.getElementById("btnMini");
+// Tour controls
+const tourStartBtn = document.getElementById('tourStart');
+const tourPauseBtn = document.getElementById('tourPause');
+const tourPrevBtn  = document.getElementById('tourPrev');
+const tourNextBtn  = document.getElementById('tourNext');
+const tourStopBtn  = document.getElementById('tourStop');
+
+const state = {
+  manifest: [],
+  manifestById: new Map(),
+  activeExpId: null,
+  agentApi: null,
+  setGateExp: null,
+  setLiveExp: null,
+  tour: null,
+};
+
+const STEP_YAW = 0.06;
+const STEP_PITCH = 0.045;
+
+// Global fullscreen helper so we can trigger it from role buttons
+export async function enterFullscreenLandscape(){
+  const d = document;
+  const target = d.documentElement;
+  const fsEl = d.fullscreenElement || d.webkitFullscreenElement || d.mozFullScreenElement || d.msFullscreenElement;
+  try {
+    if (fsEl) {
+      await (d.exitFullscreen?.() || d.webkitExitFullscreen?.() || d.mozCancelFullScreen?.() || d.msExitFullscreen?.());
+      document.body.classList.remove('fakefs');
+      updateFSButtonVisibility();
+      return;
+    }
+    if (target.requestFullscreen || target.webkitRequestFullscreen || target.mozRequestFullScreen || target.msRequestFullscreen) {
+      await (target.requestFullscreen?.() || target.webkitRequestFullscreen?.() || target.mozRequestFullScreen?.() || target.msRequestFullscreen?.());
+    } else {
+      document.body.classList.toggle('fakefs');
+    }
+    if (screen?.orientation?.lock) {
+      try { await screen.orientation.lock('landscape'); } catch {}
+    }
+    try { window.scrollTo(0, 1); } catch {}
+  } catch (err) {
+    document.body.classList.toggle('fakefs');
+  }
+  updateFSButtonVisibility();
+}
+
+function getQS() {
+  try { return new URLSearchParams(window.location.search); } catch { return new URLSearchParams(); }
+}
+
+function experiencesRootPath() {
+  return EXPERIENCES_ROOT.startsWith("/") ? EXPERIENCES_ROOT : `/${EXPERIENCES_ROOT}`;
+}
+
+function experienceAssetUrl(id, relative = "") {
+  const cleanId = String(id || "").replace(/^\/+|\/+$/g, "");
+  const suffix = relative ? `/${relative.replace(/^\/+/, "")}` : "";
+  return `${experiencesRootPath()}/${cleanId}${suffix}`.replace(/\/{2,}/g, "/");
+}
+
+// WebP support detection (sync via canvas)
+function supportsWebp() {
+  try { const c = document.createElement('canvas'); return c.toDataURL && c.toDataURL('image/webp').indexOf('image/webp') !== -1; } catch { return false; }
+}
+function choosePanoPath(absUrl) {
+  return (!supportsWebp() && /\.webp($|\?)/i.test(absUrl)) ? absUrl.replace(/\.webp(\?|$)/i, '.jpg$1') : absUrl;
+}
+
+async function loadManifest() {
+  const manifestUrl = `${experiencesRootPath()}/manifest.json`.replace(/\/{2,}/g, "/");
+  try {
+    const res = await fetch(manifestUrl, { cache: "no-cache" });
+    if (!res.ok) throw new Error(`Manifest request failed (${res.status})`);
+    const payload = await res.json();
+    const list = Array.isArray(payload?.experiences) ? payload.experiences : [];
+    if (!list.length) return EXPERIENCE_FALLBACK;
+    return list
+      .map((item, index) => ({
+        id: String(item?.id || "").trim() || EXPERIENCE_FALLBACK[0].id,
+        label: (item?.label && String(item.label).trim()) || item?.id || EXPERIENCE_FALLBACK[0].label,
+        order: Number.isFinite(item?.order) ? item.order : index,
+        stereo: Boolean(item?.stereo),
+      }))
+      .sort((a, b) => (a.order ?? 0) - (b.order ?? 0) || a.label.localeCompare(b.label));
+  } catch (err) {
+    console.warn("[manifest] using fallback", err);
+    return EXPERIENCE_FALLBACK;
+  }
+}
+
+function wireCustomSelect({ wrapId, btnId, listId, labelId, selectId }) {
+  const wrap = document.getElementById(wrapId);
+  const btn = document.getElementById(btnId);
+  const list = document.getElementById(listId);
+  const label = document.getElementById(labelId);
+  const select = document.getElementById(selectId);
+  if (!wrap || !btn || !list || !label || !select) return () => {};
+
+  function setValue(val, trigger = true) {
+    select.value = val;
+    const selectedOption = select.options[select.selectedIndex];
+    label.textContent = selectedOption?.textContent || val;
+    [...list.children].forEach((li) => {
+      const active = li.getAttribute("data-value") === val;
+      li.classList.toggle("active", active);
+      li.setAttribute("aria-selected", active ? "true" : "false");
+    });
+    if (trigger) select.dispatchEvent(new Event("change", { bubbles: true }));
+  }
+
+  btn.addEventListener("click", () => {
+    const open = wrap.getAttribute("data-open") === "true";
+    wrap.setAttribute("data-open", open ? "false" : "true");
+    btn.setAttribute("aria-expanded", (!open).toString());
+  });
+
+  list.addEventListener("click", (event) => {
+    const li = event.target.closest?.("li[data-value]");
+    if (!li) return;
+    setValue(li.getAttribute("data-value"));
+    wrap.setAttribute("data-open", "false");
+    btn.setAttribute("aria-expanded", "false");
+  });
+
+  document.addEventListener("click", (event) => {
+    if (!wrap.contains(event.target)) {
+      wrap.setAttribute("data-open", "false");
+      btn.setAttribute("aria-expanded", "false");
+    }
+  });
+
+  return setValue;
+}
+
+function populateSelect(selectEl, listEl, experiences, activeId) {
+  if (!selectEl || !listEl) return;
+  selectEl.innerHTML = "";
+  listEl.innerHTML = "";
+
+  experiences.forEach((exp, index) => {
+    const option = document.createElement("option");
+    option.value = exp.id;
+    option.textContent = exp.label;
+    if (exp.id === activeId || (!activeId && index === 0)) option.selected = true;
+    selectEl.appendChild(option);
+
+    const li = document.createElement("li");
+    li.dataset.value = exp.id;
+    li.role = "option";
+    li.textContent = exp.label;
+    li.setAttribute("aria-selected", exp.id === activeId ? "true" : "false");
+    if (exp.id === activeId) li.classList.add("active");
+    listEl.appendChild(li);
+  });
+}
+
+function normaliseExpId(id) {
+  return String(id || "").trim() || EXPERIENCE_FALLBACK[0].id;

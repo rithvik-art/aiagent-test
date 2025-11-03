@@ -1,0 +1,50 @@
+  /* data */
+  try{ window.dispatchEvent(new CustomEvent('loading:show', { detail:{ label: 'Loading tour…' } })); }catch{}
+  let { data, nodesById, startNodeId } = await loadWalkthrough((BASE + "/walkthrough.json").replace(/\/{2,}/g,"/"));
+  try{ window.dispatchEvent(new CustomEvent('loading:hide')); }catch{}
+  let currentNodeId = startNodeId;
+
+  async function maybeSelectMobilePanoDir(){
+    const node = nodesById.get(startNodeId) || (nodesById.size ? nodesById.values().next().value : null);
+    const file = node?.file;
+    if (!file) return;
+    const caps = engine.getCaps?.() || {};
+    const maxTexture = Number(caps.maxTextureSize) || 0;
+    const dpr = Math.max(1, window.devicePixelRatio || 1);
+    const needsMobile = IS_IOS || maxTexture <= 8192 || (IS_ANDROID && dpr >= 2.5);
+    if (!needsMobile) return;
+    const candidates = [];
+    if (IS_IOS || maxTexture <= 7168) candidates.push("panos-mobile-6k");
+    candidates.push("panos-mobile");
+    for (const dir of candidates){
+      const url = panoPath(dir, file);
+      try{
+        let res = await fetch(url, { method: "HEAD", cache: "no-store" });
+        if (!res?.ok && res?.status === 405){
+          res = await fetch(url, { method: "GET", cache: "no-store" });
+        }
+        if (res?.ok){
+          PANOS_DIR = dir;
+          console.info("[AGENT] Using mobile panorama folder:", dir);
+          return;
+        }
+      }catch{}
+    }
+  }
+  await maybeSelectMobilePanoDir();
+
+  /* floors */
+  const floorIndex=new Map(), floorCenter=new Map();
+  function rebuildFloorMaps(){
+    floorIndex.clear(); floorCenter.clear();
+    data.floors.forEach((f,i)=>floorIndex.set(f.id,i));
+    for (const f of data.floors){
+      const on=data.nodes.filter(n=>n.floorId===f.id);
+      let minX=Infinity,maxX=-Infinity,minY=Infinity,maxY=-Infinity;
+      for (const n of on){ if(typeof n.x==="number"&&typeof n.y==="number"){ if(n.x<minX)minX=n.x; if(n.x>maxX)maxX=n.x; if(n.y<minY)minY=n.y; if(n.y>maxY)maxY=n.y; } }
+      const ppm=f.pxPerMeter||100; const cx=isFinite(minX)?(minX+maxX)/2:0; const cy=isFinite(minY)?(minY+maxY)/2:0;
+      floorCenter.set(f.id,{cx,cy,ppm});
+    }
+  }
+  rebuildFloorMaps();
+  const nodeWorldPos = (n)=>{ const f=floorCenter.get(n.floorId)||{cx:0,cy:0,ppm:100}; const idx=floorIndex.get(n.floorId)??0; return new Vector3((n.x-f.cx)/f.ppm, idx*FLOOR_HEIGHT_M, (n.y-f.cy)/f.ppm); };

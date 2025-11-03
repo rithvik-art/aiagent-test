@@ -1,0 +1,250 @@
+    if (savedPitch===1||savedPitch===-1) state.agentApi?.setMirrorPitchSign?.(savedPitch);
+  } catch {}
+  // Apply persisted yaw sign if present
+  try {
+    const savedYaw = Number(localStorage.getItem('mirrorYawSign'));
+    if (savedYaw===1||savedYaw===-1) state.agentApi?.setMirrorYawSign?.(savedYaw);
+  } catch {}
+  // Now the first frame is ready; hide the loader.
+  dispatchEvent(new CustomEvent('loading:hide'));
+}
+
+async function startViewer() {
+  const { id } = getSelectedExperience();
+  syncActiveExperience(id, { syncGate: true, syncLive: true });
+  try{ document.body.setAttribute('data-role','viewer'); }catch{}
+  const importPromise = import("./engine/viewer.js");
+  // Attempt fullscreen + landscape early (user gesture)
+  void enterFullscreenLandscape();
+  await preloadExperience(id);
+
+  const roomId = roomInput?.value?.trim() || "demo";
+  gate?.remove();
+  if (bottomBar) bottomBar.hidden = true;
+  state.agentApi = null;
+  const { initViewer } = await importPromise;
+  await initViewer({ roomId, exp: id, experiencesMeta: state.manifest });
+  dispatchEvent(new CustomEvent('loading:hide'));
+}
+
+
+async function onLiveExperienceChange() {
+  const nextId = normaliseExpId(expSelectLive?.value);
+  syncActiveExperience(nextId, { syncGate: false, syncLive: true });
+  await preloadExperience(nextId);
+  if (state.agentApi?.switchExperience) {
+    state.agentApi.switchExperience(nextId);
+  }
+  // After switching, hide the loader since textures are already cached
+  dispatchEvent(new CustomEvent('loading:hide'));
+}
+
+async function bootstrap() {
+  // Device/orientation flags + fullscreen button wiring
+  updateHtmlFlags();
+  addEventListener('resize', updateHtmlFlags);
+  addEventListener('orientationchange', updateHtmlFlags);
+  addEventListener('orientationchange', attemptAutoFullscreenIfLandscape);
+  addEventListener('resize', attemptAutoFullscreenIfLandscape);
+  addEventListener('pointerdown', ()=>{ LAST_GESTURE_AT = Date.now(); try{ sessionStorage.setItem('autoFs','1'); }catch{} });
+  document.addEventListener('fullscreenchange', updateFSButtonVisibility);
+  document.addEventListener('webkitfullscreenchange', updateFSButtonVisibility);
+  exitFSBtn?.addEventListener('click', async ()=>{
+    try {
+      const d=document; if (d.exitFullscreen) await d.exitFullscreen();
+      else if (d.webkitExitFullscreen) await d.webkitExitFullscreen();
+    } catch {}
+    document.body.classList.remove('fakefs');
+    updateFSButtonVisibility();
+  });
+
+  // Enhance buttons: larger fullscreen icon and tooltips across controls
+  const setTip = (el, text) => { if (el){ el.setAttribute('title', text); el.setAttribute('data-tip', text); } };
+  try {
+    const fsSvg = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 9V4h5"/><path d="M20 9V4h-5"/><path d="M4 15v5h5"/><path d="M20 15v5h-5"/></svg>';
+    const upSvg = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 7l-5 5h10z"/></svg>';
+    const downSvg = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 17l5-5H7z"/></svg>';
+    const leftSvg = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M8 12l6-6v12z"/></svg>';
+    const rightSvg = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M16 12l-6 6V6z"/></svg>';
+
+    const fsBtn = document.getElementById('btnFS');
+    if (fsBtn) { fsBtn.innerHTML = fsSvg; setTip(fsBtn, 'Fullscreen'); }
+    if (btnUp)    { btnUp.innerHTML = upSvg;    setTip(btnUp,    'Look up'); }
+    if (btnDown)  { btnDown.innerHTML = downSvg;  setTip(btnDown,  'Look down'); }
+    if (btnLeft)  { btnLeft.innerHTML = leftSvg;  setTip(btnLeft,  'Look left'); }
+    if (btnRight) { btnRight.innerHTML = rightSvg; setTip(btnRight, 'Look right'); }
+    if (btnMini)   setTip(btnMini,   'Toggle minimap');
+    if (btnMirror) setTip(btnMirror, 'Switch view');
+    if (zoomInLegacy)  setTip(zoomInLegacy,  'Zoom in');
+    if (zoomOutLegacy) setTip(zoomOutLegacy, 'Zoom out');
+  } catch {}
+  state.setLiveExp = wireCustomSelect({ wrapId: "expSelectLiveWrap", btnId: "expBtn", listId: "expList", labelId: "expLabel", selectId: "expSelectLive" });
+  state.setGateExp = wireCustomSelect({ wrapId: "gateExpWrap", btnId: "gateExpBtn", listId: "gateExpList", labelId: "gateExpLabel", selectId: "expSelect" });
+
+  state.manifest = await loadManifest();
+  state.manifestById = new Map(state.manifest.map((exp) => [exp.id, exp]));
+  const initialId = normaliseExpId(state.manifest[0]?.id);
+  state.activeExpId = initialId;
+
+  populateSelect(expSelect, gateList, state.manifest, initialId);
+  populateSelect(expSelectLive, liveList, state.manifest, initialId);
+
+  if (state.setGateExp) state.setGateExp(initialId, false);
+  if (state.setLiveExp) state.setLiveExp(initialId, false);
+
+  // Optional cinematic intro + 3D start hub
+  // Default: ON. You can disable with ?intro=0 or ?skipIntro=1 or env VITE_INTRO_ENABLED=0
+  try {
+    const qs = getQS();
+    const qsIntro = (qs.get('intro')||'').trim().toLowerCase();
+    const skipIntro = qsIntro === '0' || qsIntro === 'false' || qsIntro === 'no' || qs.get('skipIntro') === '1';
+    const envOn = String(import.meta?.env?.VITE_INTRO_ENABLED ?? '0') === '1';
+    const introEnabled = !skipIntro && (qsIntro === '1' || envOn);
+    const introMs = Math.max(0, Number(import.meta?.env?.VITE_INTRO_DURATION_MS) || 5000);
+    if (introEnabled) {
+      // Hide gate during intro
+      if (gate) gate.style.display = 'none';
+      try { dispatchEvent(new CustomEvent('loading:show', { detail: { label: 'Preparing…' } })); } catch {}
+      try { console.info('[intro] enabled'); } catch {}
+      const { runStartHub } = await import('./engine/start-hub.js');
+      // Hide overlay before showing teaser + chips so it doesn't block input
+      try { dispatchEvent(new CustomEvent('loading:hide')); } catch {}
+      const res = await runStartHub({ expId: state.activeExpId, durationMs: introMs });
+      const act = (res?.action || '').toLowerCase();
+      if (act === 'host' || act === 'solo') {
+        await startGuide();
+        return;
+      }
+      // If skipped or invite, show gate again
+      if (gate) gate.style.display = '';
+    }
+  } catch (e) { console.warn('[intro] failed', e); if (gate) gate.style.display=''; }
+
+  // Background prefetch of engine code on decent networks to speed first click
+  try {
+    const conn = navigator.connection || navigator.webkitConnection || navigator.mozConnection;
+    const slow = /^(2g|slow-2g|3g)$/i.test(conn?.effectiveType || "");
+    const save = Boolean(conn?.saveData);
+    if (!slow && !save) {
+      // Only prefetch viewer to avoid pulling agent bundle when not needed
+      setTimeout(() => { import("./engine/viewer.js").catch(()=>{}); }, 600);
+    }
+  } catch {}
+
+  // auto-start by querystring (iOS needs a user gesture)
+  const qs = getQS();
+  const wantRole = (qs.get('role')||'').toLowerCase();
+  const qsExp = qs.get('exp');
+  const qsRoom = qs.get('room');
+  const flush = qs.get('flush') === '1';
+  if (qsRoom) roomInput.value = qsRoom;
+  if (qsExp && state.manifestById.has(qsExp)) {
+    state.activeExpId = qsExp; state.setGateExp?.(qsExp,false); state.setLiveExp?.(qsExp,false);
+  }
+  // Ask SW (if active) to flush pano cache when requested
+  if (flush) { try { navigator.serviceWorker?.controller?.postMessage({ type:'flush' }); } catch {} }
+  if (wantRole === 'viewer' || wantRole === 'guide') {
+    const startFn = wantRole === 'viewer' ? startViewer : startGuide;
+    if (IS_IOS) {
+      try {
+        const orient = document.documentElement.getAttribute('data-orient') || '';
+        if (orient === 'portrait') {
+          if (rotateOverlay) rotateOverlay.style.display = 'grid';
+          if (tapStartBtn) {
+            tapStartBtn.style.display = 'inline-block';
+            tapStartBtn.onclick = async () => { try { await enterFullscreenLandscape(); } catch {} await startFn(); if (rotateOverlay) rotateOverlay.style.display='none'; };
+          }
+          // Defer actual start until user taps
+          return;
+        }
+      } catch {}
+    }
+    await startFn();
+    return;
+  }
+
+  expSelect?.addEventListener("change", () => {
+    const val = normaliseExpId(expSelect.value);
+    syncActiveExperience(val, { syncGate: false, syncLive: false });
+    if (state.setLiveExp) state.setLiveExp(val, false);
+  });
+
+  expSelectLive?.addEventListener("change", () => onLiveExperienceChange().catch(console.error));
+  btnGuide?.addEventListener("click", () => startGuide().catch(console.error));
+  btnViewer?.addEventListener("click", () => startViewer().catch(console.error));
+
+  holdRepeat(btnLeft, () => state.agentApi?.nudgeYaw?.(-STEP_YAW));
+  holdRepeat(btnRight, () => state.agentApi?.nudgeYaw?.(STEP_YAW));
+  holdRepeat(btnUp, () => state.agentApi?.nudgePitch?.(STEP_PITCH));
+  holdRepeat(btnDown, () => state.agentApi?.nudgePitch?.(-STEP_PITCH));
+
+  // Zoom (support both new and legacy ids)
+  btnZoomIn?.addEventListener("click", () => state.agentApi?.adjustFov?.(-0.05));
+  btnZoomOut?.addEventListener("click", () => state.agentApi?.adjustFov?.(0.05));
+  zoomInLegacy?.addEventListener("click", () => state.agentApi?.adjustFov?.(-0.05));
+  zoomOutLegacy?.addEventListener("click", () => state.agentApi?.adjustFov?.(0.05));
+
+  // Minimap + Mirror + VR
+  btnMini?.addEventListener("click", () => state.agentApi?.toggleMinimap?.());
+  // Repurpose mirror button to swap primary/secondary views (normal vs mirror)
+  btnMirror?.addEventListener("click", () => state.agentApi?.switchView?.());
+  // Optional quick keys for mirror calibration in the field:
+  //  - Shift+V toggles pitch sign
+  //  - Shift+Y toggles yaw sign
+  window.addEventListener('keydown', (e)=>{
+    if (!e.shiftKey) return;
+    if (e.key==='V' || e.key==='v'){
+      state.agentApi?.toggleMirrorPitchSign?.();
+      try{ const cur=Number(localStorage.getItem('mirrorPitchSign'))||1; localStorage.setItem('mirrorPitchSign', String(-cur)); }catch{}
+    }
+    if (e.key==='Y' || e.key==='y'){
+      state.agentApi?.toggleMirrorYawSign?.();
+      try{ const cur=Number(localStorage.getItem('mirrorYawSign'))||1; localStorage.setItem('mirrorYawSign', String(-cur)); }catch{}
+    }
+  });
+  btnVR?.addEventListener("click", () => state.agentApi?.toggleXR?.());
+
+  // Fullscreen with iOS-friendly behavior
+  btnFullscreen?.addEventListener("click", enterFullscreenLandscape);
+  btnFS?.addEventListener("click", enterFullscreenLandscape);
+
+  // Tour controls
+  function tourReady(){ return Boolean(state.tour); }
+  tourStartBtn?.addEventListener('click', async ()=>{
+    try {
+      if (!state.tour) {
+        const { createTourController } = await import('./engine/tour.js');
+        state.tour = createTourController({ api: state.agentApi, tourId: (import.meta?.env?.VITE_TOUR_ID || 'default') });
+        window.__tour = state.tour;
+      }
+      await state.tour.start();
+    } catch(e){ console.error('[tour] start failed', e); }
+  });
+  tourPauseBtn?.addEventListener('click', ()=>{ if(!tourReady()) return; try{ state.tour.isPlaying()? state.tour.pause() : state.tour.resume(); }catch{} });
+  tourPrevBtn?.addEventListener('click', ()=>{ if(tourReady()) try{ state.tour.prev(); }catch{} });
+  tourNextBtn?.addEventListener('click', ()=>{ if(tourReady()) try{ state.tour.next(); }catch{} });
+  tourStopBtn?.addEventListener('click', ()=>{ if(tourReady()) try{ state.tour.stop(); }catch{} });
+
+  // Keyboard shortcuts (when Agent running): Space toggles, Shift+Arrows step
+  window.addEventListener('keydown', (e)=>{
+    if (!state.agentApi || !state.tour) return;
+    if (e.code==='Space') { e.preventDefault(); try{ state.tour.isPlaying()? state.tour.pause() : state.tour.resume(); }catch{} }
+    if (e.shiftKey && e.key==='ArrowLeft') { e.preventDefault(); try{ state.tour.prev(); }catch{} }
+    if (e.shiftKey && e.key==='ArrowRight'){ e.preventDefault(); try{ state.tour.next(); }catch{} }
+    if (e.key==='Escape'){ try{ state.tour.stop(); }catch{} }
+  }, { passive:false });
+
+  updateFSButtonVisibility();
+
+  window.addEventListener("keydown", (event) => {
+    if (!state.agentApi) return;
+    if (event.key === "ArrowLeft") state.agentApi.nudgeYaw?.(-STEP_YAW);
+    if (event.key === "ArrowRight") state.agentApi.nudgeYaw?.(STEP_YAW);
+    if (event.key === "ArrowUp") {
+      event.preventDefault();
+      state.agentApi.nudgePitch?.(STEP_PITCH);
+    }
+    if (event.key === "ArrowDown") {
+      event.preventDefault();
+      state.agentApi.nudgePitch?.(-STEP_PITCH);
+    }

@@ -1,0 +1,144 @@
+    for (const n of nodesForFloor) if (typeof n.x === "number" && typeof n.y === "number") {
+      if (n.x < minX) minX = n.x; if (n.x > maxX) maxX = n.x;
+      if (n.y < minY) minY = n.y; if (n.y > maxY) maxY = n.y;
+    }
+    const spanX = maxX - minX, spanY = maxY - minY;
+    if (!(spanX > 0 && spanY > 0)) return "image";
+    const ratioX = spanX / sz.w, ratioY = spanY / sz.h;
+    return ratioX < 0.75 || ratioY < 0.75 ? "editor" : "image";
+  }
+
+  function applyLabelLayout(entries, width, height) {
+    if (!Array.isArray(entries) || !entries.length) return;
+    const margin = 12;
+    const labelHalfWidth = 68;
+    const labelHalfHeight = 18;
+    const baselineY = -(labelHalfHeight + 8);
+    const positions = entries.map(entry => ({
+      x: Math.max(margin + labelHalfWidth, Math.min(width - margin - labelHalfWidth, entry.px)),
+      y: Math.max(margin + labelHalfHeight, Math.min(height - margin - labelHalfHeight, entry.py + baselineY))
+    }));
+    const MIN_DIST = 38;
+    const ITER_MAX = 48;
+    for (let iter = 0; iter < ITER_MAX; iter++) {
+      let moved = false;
+      for (let i = 0; i < positions.length; i++) {
+        for (let j = i + 1; j < positions.length; j++) {
+          const a = positions[i];
+          const b = positions[j];
+          const dx = b.x - a.x;
+          const dy = b.y - a.y;
+          const dist = Math.hypot(dx, dy);
+          if (dist < MIN_DIST) {
+            const push = (MIN_DIST - dist) / 2;
+            const angle = dist > 0.0001 ? Math.atan2(dy, dx) : (Math.PI / 2) * (j % 2 ? 1 : -1);
+            const offsetX = Math.cos(angle) * push;
+            const offsetY = Math.sin(angle) * push;
+            a.x = Math.max(margin + labelHalfWidth, Math.min(width - margin - labelHalfWidth, a.x - offsetX));
+            a.y = Math.max(margin + labelHalfHeight, Math.min(height - margin - labelHalfHeight, a.y - offsetY));
+            b.x = Math.max(margin + labelHalfWidth, Math.min(width - margin - labelHalfWidth, b.x + offsetX));
+            b.y = Math.max(margin + labelHalfHeight, Math.min(height - margin - labelHalfHeight, b.y + offsetY));
+            moved = true;
+          }
+        }
+      }
+      if (!moved) break;
+    }
+    entries.forEach((entry, idx) => {
+      entry.labelOffsetX = positions[idx].x - entry.px;
+      entry.labelOffsetY = positions[idx].y - entry.py;
+    });
+  }
+
+  function renderPoints(nodesForFloor, activeId) {
+    lastNodesForFloor = nodesForFloor || [];
+    lastActiveId = activeId || null;
+    points.innerHTML = "";
+
+    const sz = autoSizeByFloor.get(currentFloorId);
+    if (!sz || !sz.w || !sz.h) return;
+
+    const drawnW = fit.clientWidth;
+    const drawnH = fit.clientHeight;
+    if (!drawnW || !drawnH) return;
+
+    const mode = chooseMode(lastNodesForFloor, sz);
+
+    let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity;
+    if (mode === "editor") {
+      for (const n of lastNodesForFloor) if (typeof n.x === "number" && typeof n.y === "number") {
+        if (n.x < minX) minX = n.x; if (n.x > maxX) maxX = n.x;
+        if (n.y < minY) minY = n.y; if (n.y > maxY) maxY = n.y;
+      }
+      if (!isFinite(minX) || !isFinite(minY) || maxX <= minX || maxY <= minY) {
+        minX = 0; maxX = sz.w; minY = 0; maxY = sz.h;
+      }
+    }
+
+    const insetX = drawnW * edgePadRatio;
+    const insetY = drawnH * edgePadRatio;
+
+    for (const n of lastNodesForFloor) {
+      let px, py;
+      if (mode === "editor") {
+        const nx = (n.x - minX) / (maxX - minX);
+        const ny = (n.y - minY) / (maxY - minY);
+        px = insetX + nx * (drawnW - 2 * insetX);
+        py = insetY + ny * (drawnH - 2 * insetY);
+      } else {
+        const cref = getCoordRef(currentFloorId);
+        const org = getOrigin(currentFloorId);
+        const refW = (cref && cref.w) ? cref.w : sz.w;
+        const refH = (cref && cref.h) ? cref.h : sz.h;
+        const nx = ((n.x - (org.x||0)) / refW);
+        const ny = ((n.y - (org.y||0)) / refH);
+        px = nx * drawnW;
+        py = ny * drawnH;
+      }
+
+      const nudge = getPad(currentFloorId);
+      if (nudge?.x) px += nudge.x;
+      if (nudge?.y) py += nudge.y;
+
+      const dot = document.createElement("div");
+      dot.className = "mini-point" + (n.id === activeId ? " active" : "");
+      dot.style.left = px + "px";
+      dot.style.top = py + "px";
+      dot.title = n.label || n.name || n.id;
+      dot.onclick = (ev) => { ev.stopPropagation(); onSelectNode?.(n.id); };
+      points.appendChild(dot);
+
+      if (n.label || n.name) {
+        const lab = document.createElement("div");
+        lab.className = "mini-label";
+        lab.textContent = n.label || n.name;
+        lab.style.left = px + "px";
+        lab.style.top = py + "px";
+        points.appendChild(lab);
+      }
+    }
+    const entries = Array.from(points.querySelectorAll(".mini-label")).map((lab, idx) => {
+      const source = lastNodesForFloor[idx] || {};
+      const rect = { px: parseFloat(lab.style.left), py: parseFloat(lab.style.top) };
+      return { element: lab, px: rect.px, py: rect.py, node: source };
+    });
+    applyLabelLayout(entries, drawnW, drawnH);
+    entries.forEach(item => {
+      const { element, px, py, labelOffsetX = 0, labelOffsetY = 0 } = item;
+      element.style.left = (px + labelOffsetX) + "px";
+      element.style.top = (py + labelOffsetY) + "px";
+    });
+  }
+
+  selectEl.onchange = () => setActiveFloor(selectEl.value, true, true);
+
+  if (floors?.[0]) {
+    setActiveFloor(floors[0].id, true, false);
+  }
+
+  return {
+    setActiveFloor,
+    renderPoints,
+    getCurrentFloorId: () => currentFloorId,
+  };
+}

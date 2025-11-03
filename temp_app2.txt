@@ -1,0 +1,250 @@
+}
+
+async function fetchWalkthrough(expId) {
+  const url = experienceAssetUrl(expId, "walkthrough.json");
+  const response = await fetch(url, { cache: "no-cache" });
+  const text = await response.text();
+  if (!response.ok) throw new Error(`walkthrough.json fetch failed (${response.status}) at ${url}`);
+  try { return JSON.parse(text); }
+  catch { throw new Error(`Expected JSON at ${url}, got: ${text.slice(0, 80)}`); }
+}
+
+function preloadImages(urls, onProgress, concurrency = 2) {
+  return new Promise((resolve) => {
+    const total = urls.length;
+    if (total === 0) {
+      onProgress(1, 0, 0);
+      return resolve();
+    }
+    let done = 0, errs = 0, idx = 0, inFlight = 0;
+    function next() {
+      if (done + errs >= total) { resolve(); return; }
+      while (inFlight < concurrency && idx < total) {
+        const url = urls[idx++];
+        inFlight++;
+        const img = new Image();
+        img.onload = () => { inFlight--; done++; onProgress((done + errs) / total, done, errs); next(); };
+        img.onerror = () => { inFlight--; errs++; onProgress((done + errs) / total, done, errs); next(); };
+        img.decoding = "async";
+        img.loading = "eager";
+        img.src = url;
+      }
+    }
+    next();
+  });
+}
+
+// Streaming preloader with byte-level progress (smoother progress on slow links)
+async function preloadImagesStreaming(urls, onProgress, concurrency = 3) {
+  const total = urls.length;
+  if (total === 0) { onProgress?.(1); return; }
+  let active = 0, idx = 0, done = 0;
+  let totalKnown = 0, loadedKnown = 0;
+
+  const queue = urls.slice();
+
+  function report() {
+    const countFrac = total ? done / total : 1;
+    const byteFrac = totalKnown > 0 ? (loadedKnown / totalKnown) : 0;
+    const progress = Math.max(0, Math.min(1, byteFrac * 0.7 + countFrac * 0.3));
+    onProgress?.(progress);
+  }
+
+  await new Promise((resolve) => {
+    function next() {
+      if (done >= total && active === 0) { report(); resolve(); return; }
+      while (active < concurrency && idx < total) {
+        const url = queue[idx++];
+        active++;
+        (async () => {
+          try {
+            const res = await fetch(url, { cache: 'force-cache' });
+            const contentType = res.headers.get('content-type') || 'image/jpeg';
+            const reader = res.body?.getReader?.();
+            let expected = Number(res.headers.get('content-length')) || 0;
+            if (expected > 0) totalKnown += expected;
+            let received = 0;
+            const chunks = [];
+            if (reader) {
+              while (true) {
+                const { done: rdone, value } = await reader.read();
+                if (rdone) break;
+                chunks.push(value);
+                received += value.byteLength;
+                if (expected > 0) { loadedKnown += value.byteLength; report(); }
+              }
+            }
+            const blob = reader ? new Blob(chunks, { type: contentType }) : await res.blob();
+            // Decode image to ensure it can be displayed without jank later
+            let objectUrl = '';
+            try {
+              // Avoid createImageBitmap on iOS to reduce memory spikes/leaks
+              if (!IS_IOS && 'createImageBitmap' in window && typeof createImageBitmap === 'function') {
+                await createImageBitmap(blob);
+              } else {
+                await new Promise((res2, rej2) => {
+                  const img = new Image();
+                  img.decoding = 'async';
+                  img.onload = () => { try { URL.revokeObjectURL(objectUrl); } catch {} res2(); };
+                  img.onerror = (e) => { try { URL.revokeObjectURL(objectUrl); } catch {} rej2(e); };
+                  objectUrl = URL.createObjectURL(blob);
+                  img.src = objectUrl;
+                });
+              }
+            } catch {}
+          } catch {}
+          finally {
+            done++; report();
+            active--; next();
+          }
+        })();
+      }
+    }
+    next();
+  });
+}
+
+function getNetworkProfile() {
+  try {
+    const conn = navigator.connection || navigator.webkitConnection || navigator.mozConnection;
+    const effective = String(conn?.effectiveType || '').toLowerCase();
+    const saveData = Boolean(conn?.saveData);
+    const slow = /^(slow-)?2g|3g$/.test(effective);
+    const isMobile = /Android|iPhone|iPad|iPod|Quest|Oculus/i.test(navigator.userAgent);
+    return { conn, effective, saveData, slow, isMobile };
+  } catch { return { conn: null, effective: '', saveData: false, slow: false, isMobile: false }; }
+}
+
+async function preloadExperience(expId) {
+  // Keep the overlay visible across the entire boot; app will hide it
+  // only after the engine is fully initialized and first frame is ready.
+  showOverlay();
+  setProgress(0);
+
+  const data = await fetchWalkthrough(expId);
+  const files = Array.from(new Set((data?.nodes || []).map((node) => choosePanoPath(experienceAssetUrl(expId, `panos/${node.file}`)))));
+
+  // Preload hint for the very first pano
+  const head = document.head || document.getElementsByTagName('head')[0];
+  if (files[0] && head) {
+    try {
+      const link = document.createElement('link');
+      link.rel = 'preload'; link.as = 'image'; link.href = files[0];
+      link.fetchPriority = 'high';
+      head.appendChild(link);
+    } catch {}
+  }
+
+  // Ask SW (if present) to precache everything; it will no-op if not ready
+  try { navigator.serviceWorker?.controller?.postMessage({ type: 'precache', urls: files }); } catch {}
+
+  // Smoothing wrapper so the bar moves continuously even when sizes are unknown
+  let uiProgress = 0, target = 0, rafId = null; let lastUpdate = performance.now();
+  function tick() {
+    if (uiProgress >= 0.999 && target >= 0.999) { uiProgress = 1; try { dispatchEvent(new CustomEvent('loading:progress', { detail: { progress: 1 } })); } catch {} rafId = null; return; }
+    const delta = Math.max(0.002, (target - uiProgress) * 0.18);
+    if (target > uiProgress) { uiProgress = Math.min(0.995, uiProgress + delta); try { dispatchEvent(new CustomEvent('loading:progress', { detail: { progress: uiProgress } })); } catch {} }
+    rafId = requestAnimationFrame(tick);
+  }
+  function onRawProgress(p) {
+    target = Math.max(target, Math.min(0.995, p));
+    lastUpdate = performance.now();
+    if (!rafId) rafId = requestAnimationFrame(tick);
+  }
+  // Trickle toward completion if network doesn’t expose byte sizes
+  const trickle = setInterval(() => {
+    if (performance.now() - lastUpdate > 700) {
+      target = Math.min(0.9, target + 0.01);
+      if (!rafId) rafId = requestAnimationFrame(tick);
+    }
+  }, 300);
+
+  // Adaptive strategy for slow connections and iOS memory constraints
+  const { saveData, slow, isMobile } = getNetworkProfile();
+  let mode = PRELOAD_MODE;
+  if (mode !== 'all' && mode !== 'stage') mode = (saveData || slow || IS_IOS) ? 'stage' : 'all';
+  const stageCount = mode === 'all' ? files.length : (saveData || slow || IS_IOS ? 1 : (isMobile ? 2 : 3));
+  const stageList = files.slice(0, Math.min(files.length, stageCount));
+  const restList = files.slice(stageList.length);
+
+  const mobileConc = IS_IOS ? 1 : (IS_ANDROID ? Math.max(1, Math.min(PRELOAD_CONCURRENCY, 2)) : PRELOAD_CONCURRENCY);
+  await preloadImagesStreaming(stageList, onRawProgress, mobileConc);
+  if (mode === 'all' && restList.length) {
+    await preloadImagesStreaming(restList, onRawProgress, Math.max(1, mobileConc));
+  } else if (restList.length) {
+    // Background warm cache of remaining panos; no need to await
+    preloadImagesStreaming(restList, () => {}, Math.max(1, Math.min(2, mobileConc))).catch(()=>{});
+  }
+
+  // Finish bar to 100% (engine init will hide overlay after first frame)
+  clearInterval(trickle);
+  target = 1; if (!rafId) rafId = requestAnimationFrame(tick);
+}
+
+function holdRepeat(el, fn, firstDelay = 230, interval = 45) {
+  if (!el) return;
+  let timeout = null;
+  let repeat = null;
+  const start = (event) => {
+    if (event.isPrimary === false) return;
+    event.preventDefault();
+    el.setPointerCapture?.(event.pointerId);
+    if (timeout || repeat) return;
+    fn();
+    timeout = setTimeout(() => {
+      repeat = setInterval(fn, interval);
+    }, firstDelay);
+  };
+  const stop = (event) => {
+    if (repeat) clearInterval(repeat);
+    if (timeout) clearTimeout(timeout);
+    repeat = null;
+    timeout = null;
+    try { el.releasePointerCapture?.(event.pointerId); } catch {}
+  };
+  el.addEventListener("pointerdown", start, { passive: false });
+  el.addEventListener("pointerup", stop);
+  el.addEventListener("pointercancel", stop);
+  el.addEventListener("pointerleave", stop);
+}
+
+function syncActiveExperience(id, { syncLive = true, syncGate = false } = {}) {
+  state.activeExpId = id;
+  if (syncGate && state.setGateExp) state.setGateExp(id, false);
+  if (syncLive && state.setLiveExp) state.setLiveExp(id, false);
+}
+
+function getSelectedExperience() {
+  const id = normaliseExpId(expSelect?.value || state.activeExpId);
+  return state.manifestById.get(id) || { id, label: id };
+}
+
+async function startGuide() {
+  const { id } = getSelectedExperience();
+  syncActiveExperience(id, { syncGate: true, syncLive: true });
+  try{ document.body.setAttribute('data-role','guide'); }catch{}
+  // Use stub to avoid breaking dev if agent.js is unavailable
+  const importPromise = import("./engine/agent.js");
+  // Attempt fullscreen + landscape early (user gesture)
+  void enterFullscreenLandscape();
+  await preloadExperience(id);
+
+  const roomId = roomInput?.value?.trim() || "demo";
+  gate?.remove();
+  if (bottomBar) { bottomBar.hidden = false; bottomBar.style.display = 'flex'; }
+  
+  // Engine chunk + init; overlay remains visible from preload until we're fully ready
+  const { initAgent } = await importPromise;
+  state.agentApi = await initAgent({ roomId, exp: id, experiencesMeta: state.manifest });
+  // Build tour controller lazily
+  try {
+    const { createTourController } = await import('./engine/tour.js');
+    state.tour = createTourController({ api: state.agentApi, tourId: (import.meta?.env?.VITE_TOUR_ID || 'default') });
+    window.__tour = state.tour; // exposed for AI voice
+    // Auto-start tour if enabled
+    const AUTOSTART = String(import.meta?.env?.VITE_TOUR_AUTOSTART ?? '1') === '1';
+    if (AUTOSTART) { try { await state.tour.start(); } catch (e) { console.warn('[tour] autostart failed', e); } }
+  } catch {}
+  // If a persisted mirror pitch sign exists (for field calibration), apply it
+  try {
+    const savedPitch = Number(localStorage.getItem('mirrorPitchSign'));

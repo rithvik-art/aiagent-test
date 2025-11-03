@@ -1,0 +1,22 @@
+  }, { passive: false });
+}
+
+bootstrap().catch((err) => console.error("[app] bootstrap failed", err));
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

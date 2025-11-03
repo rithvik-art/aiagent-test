@@ -1,0 +1,80 @@
+  const hotspotRootXR = new TransformNode("hotspotsXR", scene); hotspotRootXR.layerMask=0x1;
+  function vecFromYawPitch(yawDeg,pitchDeg,R,flipY=false){ const y=rad(yawDeg), p=rad(pitchDeg||0), cp=Math.cos(p), sp=Math.sin(p); const ySign = flipY ? -1 : 1; return new Vector3(R*Math.cos(y)*cp, ySign*R*sp, -R*Math.sin(y)*cp); }
+  function clearHotspots(){ try{ hotspotRoot.getChildren().forEach(n=>n.dispose()); }catch{} try{ hotspotRootXR.getChildren().forEach(n=>n.dispose()); }catch{} }
+  function buildHotspotsInRoot(node, parentRoot, flipXLocal=false, isXR=false){
+    if (!node?.hotspots) return;
+    const R = (DOME_DIAMETER/2) * 0.98;
+    for (const h of node.hotspots){
+      const toId = h?.to; if (!toId || !nodesById.has(toId)) continue;
+      const root=new TransformNode("hs-"+(toId||""),scene); root.parent=parentRoot||hotspotRoot; root.layerMask=0x1; root.metadata={ hotspot:true, to:toId };
+      const ring=MeshBuilder.CreateDisc("hsRing",{radius:20,tessellation:48,sideOrientation:Mesh.DOUBLESIDE},scene);
+      const dot =MeshBuilder.CreateDisc("hsDot",{radius:10,tessellation:32,sideOrientation:Mesh.DOUBLESIDE},scene);
+      const rm=new StandardMaterial("hsRingMat",scene); rm.disableLighting=true; rm.emissiveColor=new Color3(1,1,1);
+      const dm=new StandardMaterial("hsDotMat",scene);  dm.disableLighting=true; dm.emissiveColor=new Color3(1,0.62,0.18);
+      ring.material=rm; dot.material=dm; ring.parent=root; dot.parent=root;
+      ring.billboardMode=Mesh.BILLBOARDMODE_ALL; dot.billboardMode=Mesh.BILLBOARDMODE_ALL;
+      ring.isPickable=false; dot.isPickable=false;
+      const pick=MeshBuilder.CreateSphere("hsPick",{diameter:120,segments:8},scene);
+      const pm=new StandardMaterial("hsPickMat",scene); pm.alpha=0.001; pm.disableLighting=true; pm.backFaceCulling=false;
+      pick.material=pm; pick.parent=root; pick.isPickable=true; pick.metadata={ hotspot:true, to:toId };
+      // FIX: When dome is flipped (FLIP_X), invert Y coordinate for hotspots
+      const v = vecFromYawPitch(h.yaw||0, h.pitch||0, R, flipXLocal);
+      root.position.copyFrom(v);
+      try{ root.lookAt(Vector3.Zero()); }catch{}
+    }
+  }
+  function buildHotspotsFor(node){ clearHotspots(); buildHotspotsInRoot(node, hotspotRoot, /*flipXLocal*/ FLIP_X, /*isXR*/ false); }
+
+  // 2D pick
+  scene.onPointerObservable.add(poi=>{
+    if (poi.type!==PointerEventTypes.POINTERUP) return;
+    const pick=scene.pick(scene.pointerX,scene.pointerY,m=>m?.metadata?.hotspot===true,false,cam);
+    const toId=pick?.pickedMesh?.metadata?.to;
+    if (toId && nodesById.has(toId)) goTo(toId, true);
+  });
+
+  /* minimap */
+  let mini=null;
+  function rebuildMinimap(){
+    document.querySelectorAll(".mini-wrap").forEach(el=>el.remove());
+    const padByFloor = new Map(data.floors.map(f=>[f.id,{x:0,y:0}]));
+    // Coordinate reference per floor: auto-detect from zones (preferred) or nodes
+    const coordByFloor = new Map(); // fid -> { w, h }
+    const originByFloor = new Map(); // fid -> { x, y }
+
+    // Zones support: build one marker per zone (centroid of polygon), fallback to nodes when zones absent
+    const hasZones = Array.isArray(data?.zones) && data.zones.length > 0;
+    const zonesByFloor = new Map(); // fid -> [{id,x,y}]
+    const zoneRep = new Map();      // zoneId -> representative nodeId
+    if (hasZones){
+      const centroid = (pts)=>{
+        if (!Array.isArray(pts) || pts.length === 0) return { x: 0, y: 0 };
+        let sx=0, sy=0; for (const p of pts){ sx += Number(p?.x)||0; sy += Number(p?.y)||0; }
+        return { x: sx/pts.length, y: sy/pts.length };
+      };
+      // Detect coordinate extents (max X/Y) per floor from zone polygons
+      const extents = new Map(); // fid -> { minX, minY, maxX, maxY }
+      for (const z of (data.zones||[])){
+        const c = centroid(z.points || []);
+        if (!zonesByFloor.has(z.floorId)) zonesByFloor.set(z.floorId, []);
+        zonesByFloor.get(z.floorId).push({ id: z.id, x: c.x, y: c.y, label: (typeof z.name==='string'? z.name : z.id) });
+        // track max extents
+        const arr = Array.isArray(z.points) ? z.points : [];
+        let e = extents.get(z.floorId) || { minX:Infinity, minY:Infinity, maxX:0, maxY:0 };
+        for (const p of arr){ const px = Number(p?.x)||0, py = Number(p?.y)||0; if (px>e.maxX) e.maxX=px; if (py>e.maxY) e.maxY=py; if (px<e.minX) e.minX=px; if (py<e.minY) e.minY=py; }
+        extents.set(z.floorId, e);
+        let rep = (typeof z.repNodeId === 'string' && nodesById.has(z.repNodeId)) ? z.repNodeId : null;
+        if (!rep){ const found = (data.nodes || []).find(n => n.zoneId === z.id); rep = found?.id || null; }
+        if (!rep){ rep = startNodeId || (nodesById.size? nodesById.values().next().value?.id : null); }
+        if (rep) zoneRep.set(z.id, rep);
+      }
+      // Write coord reference from detected extents (fallback to image size if too small)
+      for (const f of data.floors){ const e = extents.get(f.id); if (e){
+        const w = Math.max((Number(e.maxX)||0) - (isFinite(e.minX)?Number(e.minX):0), Number(f.width||0)||0);
+        const h = Math.max((Number(e.maxY)||0) - (isFinite(e.minY)?Number(e.minY):0), Number(f.height||0)||0);
+        if (isFinite(e.minX) && isFinite(e.minY)) originByFloor.set(f.id, { x: e.minX, y: e.minY });
+        if (w>0 && h>0) coordByFloor.set(f.id, { w, h });
+      } }
+    }
+
+    mini = buildMinimapDOM({

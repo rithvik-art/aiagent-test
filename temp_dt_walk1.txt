@@ -1,0 +1,80 @@
+{
+    "project":  {
+                    "floors":  [
+                                   {
+                                       "id":  "floor-1",
+                                       "name":  "Floor 1",
+                                       "image":  "WhatsApp Image 2025-10-17 at 11.33.49 AM.jpeg",
+                                       "pxPerMeter":  100
+                                   }
+                               ],
+                    "zones":  [
+                                  {
+                                      "id":  "zone-1",
+                                      "name":  "enrance to reception",
+                                      "floorId":  "floor-1",
+                                      "repNodeId":  null,
+                                      "points":  [
+                                                     {
+                                                         "x":  292,
+                                                         "y":  14
+                                                     },
+                                                     {
+                                                         "x":  132,
+                                                         "y":  13
+                                                     },
+                                                     {
+                                                         "x":  133,
+                                                         "y":  93
+                                                     },
+                                                     {
+                                                         "x":  291,
+                                                         "y":  98
+                                                     }
+                                                 ]
+                                  },
+                                  {
+                                      "id":  "zone-2",
+                                      "name":  "office",
+                                      "floorId":  "floor-1",
+                                      "repNodeId":  null,
+                                      "points":  [
+                                                     {
+                                                         "x":  131,
+                                                         "y":  102
+                                                     },
+                                                     {
+                                                         "x":  248,
+                                                         "y":  103
+                                                     },
+                                                     {
+                                                         "x":  248,
+                                                         "y":  238
+                                                     },
+                                                     {
+                                                         "x":  75,
+                                                         "y":  242
+                                                     }
+                                                 ]
+                                  }
+                              ],
+                    "nodes":  [
+                                  {
+                                      "id":  "pano-1",
+                                      "file":  "IMG_20250909_112504_00_016.webp",
+                                      "floorId":  "floor-1",
+                                      "x":  200,
+                                      "y":  200,
+                                      "z":  0,
+                                      "yaw":  0,
+                                      "hotspots":  [
+                                                       {
+                                                           "to":  "pano-2",
+                                                           "type":  "walk",
+                                                           "yaw":  181.04156005692994,
+                                                           "pitch":  1.270467268720249,
+                                                           "absYaw":  181.04156005692994,
+                                                           "absPitch":  1.270467268720249,
+                                                           "dir":  [
+                                                                       -0.9995889840189921,
+                                                                       0.022172019854179572,

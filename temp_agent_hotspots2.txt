@@ -1,0 +1,20 @@
+      ring.isPickable=false; dot.isPickable=false;
+      const pick=MeshBuilder.CreateSphere("hsPick",{diameter:120,segments:8},scene);
+      const pm=new StandardMaterial("hsPickMat",scene); pm.alpha=0.001; pm.disableLighting=true; pm.backFaceCulling=false;
+      pick.material=pm; pick.parent=root; pick.isPickable=true; pick.metadata={ hotspot:true, to:toId };
+      // FIX: When dome is flipped (FLIP_X), invert Y coordinate for hotspots
+      const v = vecFromYawPitch(h.yaw||0, h.pitch||0, R, flipXLocal);
+      root.position.copyFrom(v);
+      try{ root.lookAt(Vector3.Zero()); }catch{}
+    }
+  }
+  function buildHotspotsFor(node){ clearHotspots(); buildHotspotsInRoot(node, hotspotRoot, /*flipXLocal*/ FLIP_X, /*isXR*/ false); }
+
+  // 2D pick
+  scene.onPointerObservable.add(poi=>{
+    if (poi.type!==PointerEventTypes.POINTERUP) return;
+    const pick=scene.pick(scene.pointerX,scene.pointerY,m=>m?.metadata?.hotspot===true,false,cam);
+    const toId=pick?.pickedMesh?.metadata?.to;
+    if (toId && nodesById.has(toId)) goTo(toId, true);
+  });
+

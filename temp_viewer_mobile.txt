@@ -1,0 +1,60 @@
+  cam.maxZ = 50000;
+
+  /* Data */
+  let data, nodesById, startNodeId;
+  try{ window.dispatchEvent(new CustomEvent('loading:show', { detail:{ label: 'Loading tour…' } })); }catch{}
+  ({ data, nodesById, startNodeId } = await loadWalkthrough(`${BASE}/walkthrough.json`));
+  try{ window.dispatchEvent(new CustomEvent('loading:hide')); }catch{}
+  let currentNodeId = startNodeId;
+
+  // If on iOS or small GPUs, try a mobile-optimized folder (panos-mobile) if present
+  async function maybeUseMobilePanos() {
+    try {
+      const maxTex = engine.getCaps()?.maxTextureSize || 4096;
+      const shouldPrefer = IS_IOS || maxTex < 8192;
+      if (!shouldPrefer) return;
+      const startFile = (nodesById?.get?.(currentNodeId)?.file) || '';
+      if (!startFile) { PANOS_DIR = 'panos'; return; }
+      // Prefer 6K variant on larger iPads where available
+      const probe6k = `${BASE}/panos-mobile-6k/${chooseFile(startFile)}`.replace(/\/{2,}/g, '/');
+      const probe4k = `${BASE}/panos-mobile/${chooseFile(startFile)}`.replace(/\/{2,}/g, '/');
+      if (maxTex >= 6144) {
+        const r6 = await fetch(probe6k, { method: 'HEAD', cache: 'no-cache' });
+        if (r6.ok) { PANOS_DIR = 'panos-mobile-6k'; return; }
+      }
+      const r4 = await fetch(probe4k, { method: 'HEAD', cache: 'no-cache' });
+      if (r4.ok) { PANOS_DIR = 'panos-mobile'; }
+    } catch { /* no-op: keep default */ }
+  }
+  await maybeUseMobilePanos();
+
+  /* Floors -> world positions */
+  const floorIndex = new Map();
+  const floorCenters = new Map();
+  function rebuildFloorMaps() {
+    floorIndex.clear();
+    floorCenters.clear();
+    data.floors.forEach((f, i) => floorIndex.set(f.id, i));
+    for (const f of data.floors) {
+      const on = data.nodes.filter((n) => n.floorId === f.id);
+      let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity;
+      for (const n of on) {
+        if (typeof n.x === "number" && typeof n.y === "number") {
+          if (n.x < minX) minX = n.x;
+          if (n.x > maxX) maxX = n.x;
+          if (n.y < minY) minY = n.y;
+          if (n.y > maxY) maxY = n.y;
+        }
+      }
+      const ppm = f.pxPerMeter || 100;
+      const cx = isFinite(minX) ? (minX + maxX) / 2 : 0;
+      const cy = isFinite(minY) ? (minY + maxY) / 2 : 0;
+      floorCenters.set(f.id, { cx, cy, ppm });
+    }
+  }
+  rebuildFloorMaps();
+  const nodeWorldPos = (n) => {
+    const f = floorCenters.get(n.floorId) || { cx: 0, cy: 0, ppm: 100 };
+    const idx = floorIndex.get(n.floorId) ?? 0;
+    return new Vector3((n.x - f.cx) / f.ppm, idx * FLOOR_HEIGHT_M, (n.y - f.cy) / f.ppm);
+  };

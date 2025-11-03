@@ -1,0 +1,120 @@
+    const url = WS_LIST[idx];
+    console.log('[VIEWER] Connecting to WebSocket:', url);
+    try { socket = new WebSocket(url); } catch(e) { console.warn('[VIEWER] WebSocket create failed:', e); socket = null; if (wsLockedIdx<0) wsIndex=(wsIndex+1)%WS_LIST.length; return setTimeout(connect, retryMs); }
+    let opened=false; const OPEN_TIMEOUT_MS=3500; const to=setTimeout(()=>{ if(!opened){ console.warn('[VIEWER] WebSocket timeout'); try{ socket?.close(); }catch{} } }, OPEN_TIMEOUT_MS);
+    socket.addEventListener("open", () => { opened=true; clearTimeout(to); wsOpen=true; retryMs=2000; wsLockedIdx = idx; console.log('[VIEWER] WebSocket connected, joining room:', roomId); try { socket?.send(JSON.stringify({ type: "join", room: roomId, role: "viewer", uid })); } catch(e) { console.error('[VIEWER] Join send failed:', e); } });
+    function schedule(reason){
+      clearTimeout(to);
+      wsOpen=false;
+      console.warn('[VIEWER] WebSocket disconnected:', reason);
+      try{ socket?.close(); }catch{};
+      // On failure, rotate to the next endpoint instead of staying locked
+      wsLockedIdx = -1;
+      wsIndex = (wsIndex+1) % WS_LIST.length;
+      setTimeout(connect, retryMs);
+      retryMs = Math.min(retryMs*1.7, 15000);
+    }
+    socket.addEventListener("close", ()=>schedule('close'));
+    socket.addEventListener("error", (e)=>{ console.error('[VIEWER] WebSocket error:', e); schedule('error'); });
+    socket.addEventListener("message", async (ev) => {
+      let msg;
+      try { msg = JSON.parse(ev.data); } catch { return; }
+      if (msg?.type !== "sync" || msg.room !== roomId) return;
+      const nextExpValue = msg.expPath ?? msg.exp;
+      if (nextExpValue) {
+        const nextPath = ensureExpPath(nextExpValue);
+        if (`${BASE_URL}${nextPath}` !== BASE) {
+          expPath = nextPath; BASE = `${BASE_URL}${expPath}`.replace(/\/{2,}/g, "/");
+          ({ data, nodesById, startNodeId } = await loadWalkthrough(`${BASE}/walkthrough.json`));
+          // Dispose old textures when switching experience
+          try{ for (const [k,tex] of texCache.entries()){ try{ tex?.dispose?.(); }catch{} } texCache.clear(); }catch{}
+          rebuildFloorMaps();
+        }
+      }
+      if (msg.nodeId && nodesById.has(msg.nodeId)) {
+        currentNodeId = msg.nodeId; const node = nodesById.get(currentNodeId);
+        // Apply position always (used by non‑XR to keep world in sync)
+        if (!inXR) worldRoot.position.copyFrom(nodeWorldPos(node));
+        // Do not apply guide yaw; mirror shows viewer's camera
+        if (!IGNORE_GUIDE_YAW && !inXR && typeof msg.panoYaw === "number") worldRoot.rotation.y = msg.panoYaw;
+        await refreshDomeForCurrentNode();
+      } else {
+        // Ignore guide yaw entirely (viewer controls orientation)
+        if (!IGNORE_GUIDE_YAW && !inXR && typeof msg.panoYaw === "number") worldRoot.rotation.y = msg.panoYaw;
+        if (!inXR && Array.isArray(msg.worldPos) && msg.worldPos.length === 3) {
+          worldRoot.position.copyFrom(new Vector3(msg.worldPos[0], msg.worldPos[1], msg.worldPos[2]));
+        }
+      }
+    });
+    if (poseObs) { try { scene.onBeforeRenderObservable.remove(poseObs); } catch {} }
+    // Helper for angular difference
+    const aDelta = (a,b)=>{ const TAU=Math.PI*2; let d=(a-b)%TAU; if(d>Math.PI) d-=TAU; if(d<-Math.PI) d+=TAU; return Math.abs(d); };
+    let lastSentYaw=0, lastSentPitch=0, lastSentMs=0;
+    poseObs = scene.onBeforeRenderObservable.add(()=>{
+      const now = performance.now();
+      // OPTIMIZED: 10Hz (~100ms) for low bandwidth
+      if (now - lastPoseT <= 100) return;
+      const ready = !!(socket && socket.readyState === 1);
+      if (!ready) { lastPoseT = now; return; }
+      // Stream viewer pose with quantization and change detection
+      try {
+        const q = (v, step) => Math.round(v / step) * step;
+        const pose = computeViewerPose();
+        // Quantize to reduce sensor noise jitter
+        pose.yaw   = q(pose.yaw,   0.005); // ~0.29°
+        pose.pitch = q(pose.pitch, 0.005);
+        // Send only if meaningful change or periodic keepalive
+        const MIN_DELTA = 0.0087; // ~0.5°
+        const KEEPALIVE_MS = 1000;
+        const changed = (aDelta(pose.yaw, lastSentYaw) >= MIN_DELTA) || (aDelta(pose.pitch, lastSentPitch) >= MIN_DELTA);
+        const needKeepAlive = (now - lastSentMs) >= KEEPALIVE_MS;
+        if (changed || needKeepAlive){
+          const payload = { type: "sync", room: roomId, from: "viewer", uid, nodeId: currentNodeId, pose };
+          socket.send(JSON.stringify(payload));
+          lastSentYaw = pose.yaw; lastSentPitch = pose.pitch; lastSentMs = now;
+          if (changed) console.log('[VIEWER] Sent pose update:', { yaw: pose.yaw.toFixed(3), pitch: pose.pitch.toFixed(3), mode: pose.mode });
+        }
+      } catch {}
+      lastPoseT = now;
+    });
+  })();
+
+  /* Start */
+  const start = nodesById.get(startNodeId);
+  currentNodeId = start.id;
+  worldRoot.position.copyFrom(nodeWorldPos(start));
+  worldRoot.rotation.y = -((Math.PI / 180) * (start.yaw || 0));
+  await refreshDomeForCurrentNode();
+
+  engine.runRenderLoop(() => scene.render());
+  addEventListener("resize", () => engine.resize());
+  return {};
+}
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

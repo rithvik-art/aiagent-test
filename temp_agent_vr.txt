@@ -1,0 +1,80 @@
+  canvas.addEventListener("pointermove",e=>{ if(!dragging) return; const dx=e.clientX-lastX, dy=e.clientY-lastY; lastX=e.clientX; lastY=e.clientY; cam.rotation.y -= dx*yawSpeed; setCamPitch(cPitch - dy*pitchSpeed); sendSync(currentNodeId); },{passive:true});
+  canvas.addEventListener("pointerup",()=>{ dragging=false; canvas.style.cursor="grab"; },{passive:true});
+  // Zoom and pinch
+  const MIN_FOV = 0.45, MAX_FOV = 1.7; function clampFov(v){ return Math.max(MIN_FOV, Math.min(MAX_FOV, v)); }
+  const fingers = new Map(); let pinchOn=false, pinchRef=0, pinchBase=cam.fov;
+  function pDist(a,b){ const dx=a.x-b.x, dy=a.y-b.y; return Math.hypot(dx,dy) || 1; }
+  canvas.addEventListener("pointerdown", (e)=>{ fingers.set(e.pointerId, { x:e.clientX, y:e.clientY }); if (fingers.size === 2){ const arr=[...fingers.values()]; pinchRef = pDist(arr[0], arr[1]); pinchBase = cam.fov; pinchOn = true; dragging = false; canvas.style.cursor='grab'; } }, { passive:false });
+  canvas.addEventListener("pointermove", (e)=>{ const p=fingers.get(e.pointerId); if (p){ p.x=e.clientX; p.y=e.clientY; } if (pinchOn && fingers.size>=2){ const arr=[...fingers.values()]; const cur = pDist(arr[0], arr[1]); const scale = Math.max(0.25, Math.min(4, cur / (pinchRef || 1))); cam.fov = clampFov(pinchBase * scale); } }, { passive:true });
+  function endPinch(e){ fingers.delete(e.pointerId); if (fingers.size < 2) pinchOn = false; }
+  canvas.addEventListener("pointerup", endPinch, { passive:true });
+  canvas.addEventListener("pointercancel", endPinch, { passive:true });
+  canvas.addEventListener("pointerleave", endPinch, { passive:true });
+  canvas.addEventListener("wheel", (e)=>{ e.preventDefault(); const step = Math.max(-0.2, Math.min(0.2, (e.deltaY||0)*0.0012)); cam.fov = clampFov(cam.fov + step); }, { passive:false });
+
+  // No extra smoothing to avoid drift; rely on direct mapping above
+
+  /* XR (optional) */
+  let xr=null; let inXR=false; const vrDomes=[null,null]; let activeVr=0; let prevHSL=null;
+  function setVrStereoMode(d){ const mode = isStereo()? PhotoDome.MODE_TOPBOTTOM : PhotoDome.MODE_MONOSCOPIC; try{ if("stereoMode" in d) d.stereoMode=mode; }catch{} try{ if("imageMode" in d) d.imageMode=mode; }catch{} }
+  function ensureVrDome(index){ if (vrDomes[index]) return vrDomes[index]; const domeVR = new PhotoDome("pd_"+index, panoUrl(nodesById?.get?.(currentNodeId)?.file || ""), { size:DOME_DIAMETER }, scene); domeVR.mesh.isVisible = false; domeVR.mesh.isPickable = false; domeVR.mesh.parent = worldRoot; vrDomes[index] = domeVR; return domeVR; }
+  function attachXRHotspotsToCurrentDome(){ try{ const mesh = (vrDomes[activeVr]||vrDomes[0]||vrDomes[1])?.mesh || ensureVrDome(activeVr)?.mesh; if (mesh) hotspotRootXR.parent = mesh; }catch{} }
+  async function setVrPano(file){ const idx = 1-activeVr; const d = ensureVrDome(idx); setVrStereoMode(d); await new Promise(res=>{ const tex = d?.photoTexture; if(!tex){ res(); return; } let done=false; const obs = tex.onLoadObservable.add(()=>{ done=true; try{ tex.onLoadObservable.remove(obs); }catch{} res(); }); try{ tex.updateURL(panoUrl(file)); }catch{ try{ tex.onLoadObservable.remove(obs); }catch{} res(); } setTimeout(()=>{ if(!done){ try{ tex.onLoadObservable.remove(obs); }catch{} res(); } }, 1200); }).then(()=>{ try{ if(d.photoTexture){ d.photoTexture.anisotropicFilteringLevel=8; } }catch{} }); d.mesh.isVisible=true; try{ const cur=vrDomes[activeVr]; if(cur) cur.mesh.isVisible=false; }catch{} activeVr=idx; attachXRHotspotsToCurrentDome(); try{ hotspotRoot.setEnabled(false); hotspotRootXR.setEnabled(true); }catch{} }
+  try{
+    if (navigator?.xr){
+      const qs = new URLSearchParams(location.search); const xrRef = (qs.get('xrRef') || 'local-floor');
+      xr = await scene.createDefaultXRExperienceAsync({ uiOptions:{sessionMode:"immersive-vr", referenceSpaceType:xrRef }, optionalFeatures:true });
+      // Avoid remote hand mesh fetches in constrained networks
+      try{ const fm = xr?.baseExperience?.featuresManager; fm?.enableFeature?.('hand-tracking','latest',{ xrInput: xr?.baseExperience?.input, jointMeshes:false, doNotLoadHandMesh:true }); }catch{}
+      // Fallback: manual ray from controllers + trigger
+      try{
+        const input = xr?.baseExperience?.input;
+        const lasers = new Map();
+        input?.onControllerAddedObservable?.add((source)=>{
+          try{
+            const ptr = source?.pointer; if (!ptr) return;
+            const len = DOME_DIAMETER*0.7;
+            const laser = MeshBuilder.CreateBox("laser_"+(lasers.size+1), { height:0.004, width:0.004, depth: len }, scene);
+            const lm = new StandardMaterial("laserMat", scene); lm.disableLighting=true; lm.emissiveColor=new Color3(0.95,0.8,0.2); lm.backFaceCulling=false;
+            laser.material=lm; laser.isPickable=false; laser.parent=ptr; laser.position.z = len/2; lasers.set(source, laser);
+            source.onMotionControllerInitObservable.add((mc)=>{
+              try{ const tr = mc?.getComponent?.('xr-standard-trigger') || mc?.getComponent?.('trigger'); tr?.onButtonStateChangedObservable?.add((c)=>{ if (c.pressed){ try{ const origin = ptr.getAbsolutePosition?.() || ptr.absolutePosition || ptr.position; const dir = Vector3.TransformNormal(new Vector3(0,0,1), ptr.getWorldMatrix()).normalize(); const ray = new Ray(origin, dir, DOME_DIAMETER); const hit = scene.pickWithRay(ray, m=>m?.metadata?.hotspot===true); const toId = hit?.pickedMesh?.metadata?.to; if (toId && nodesById.has(toId)) goTo(toId, true); }catch{} } }); }catch{}
+            });
+          }catch{}
+        });
+        input?.onControllerRemovedObservable?.add((source)=>{ try{ lasers.get(source)?.dispose?.(); lasers.delete(source); }catch{} });
+      }catch{}
+      xr?.baseExperience?.onStateChangedObservable?.add(s=>{
+        inXR = (s === WebXRState.IN_XR);
+        try{ if (inXR){ prevHSL = engine.getHardwareScalingLevel?.() ?? null; engine.setHardwareScalingLevel(1.0); } else if (prevHSL!=null){ engine.setHardwareScalingLevel(prevHSL); } }catch{}
+        try{ const cur = nodesById?.get?.(currentNodeId); if (cur && cur.file) { showFile(cur.file); buildHotspotsFor(cur); } }catch{}
+      });
+    }
+  }catch{}
+
+  /* boot */
+  const start = nodesById.get(startNodeId);
+  await showFile(start.file);
+  worldRoot.position.copyFrom(nodeWorldPos(start));
+  cam.rotation.y = -rad(start.yaw||0); cam.rotation.x = 0;
+  buildHotspotsFor(start);
+  await setMirrorNode(start.id);
+  updateMirrorLayout();
+  sendSync(start.id);
+
+  const api = {
+    nudgeYaw:  d=>{ cam.rotation.y += (d||0); sendSync(currentNodeId); },
+    nudgePitch:d=>{ const clamp=Math.PI*70/180; const nx=Math.max(-clamp,Math.min(clamp,cam.rotation.x + (d||0))); cam.rotation.x = nx; sendSync(currentNodeId); },
+    adjustFov: d=>{ const MIN_FOV=0.45, MAX_FOV=1.7; cam.fov=Math.max(MIN_FOV,Math.min(MAX_FOV, cam.fov + (d||0))); },
+    toggleMirror: ()=>{ mirrorVisible=!mirrorVisible; if (!mirrorVisible) cam.viewport=new Viewport(0,0,1,1); updateMirrorLayout(); },
+    switchView: ()=>{ mirrorPrimary = !mirrorPrimary; updateMirrorLayout(); },
+    toggleMinimap: ()=>{ const wrap=document.querySelector('.mini-wrap'); if(wrap){ const show=wrap.style.display==='none'; wrap.style.display= show? '' : 'none'; } },
+    toggleXR: async ()=>{ if (!xr?.baseExperience) return; try{ const inx = (xr.baseExperience.state===WebXRState.IN_XR); if (inx) { await xr.baseExperience.exitXRAsync?.(); } else { await xr.baseExperience.enterXRAsync?.("immersive-vr", "local-floor"); } }catch{} },
+    switchExperience: async (newExp)=>{
+      if (!newExp) return;
+      const next=(BASE_URL+"experiences/"+newExp).replace(/\/{2,}/g,"/"); if (next===BASE) return;
+      BASE=next;
+      PANOS_DIR = "panos";
+      try{ for (const [k,tex] of texCache.entries()){ try{ tex?.dispose?.(); }catch{} } texCache.clear(); }catch{}
+      ({ data, nodesById, startNodeId } = await loadWalkthrough((BASE + "/walkthrough.json").replace(/\/{2,}/g,"/")));
+      await maybeSelectMobilePanoDir();

@@ -1,0 +1,56 @@
+<!DOCTYPE html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, user-scalable=no" />
+    <title>Babylon AI Walkthrough</title>
+    <style>
+      :root { color-scheme: dark; }
+      html, body { margin: 0; height: 100%; }
+      body { overflow: hidden; font-family: system-ui, -apple-system, Segoe UI, Roboto, sans-serif; }
+      #renderCanvas { width: 100%; height: 100dvh; display: block; touch-action: none; }
+      .hud {
+        position: fixed; left: 12px; top: 12px; right: 12px; z-index: 10;
+        display: flex; gap: 8px; align-items: center; justify-content: space-between;
+        background: rgba(0,0,0,0.35); color: #fff; padding: calc(8px + env(safe-area-inset-top)/3) calc(12px + env(safe-area-inset-right)/3); border-radius: 12px; margin-left: env(safe-area-inset-left); margin-right: env(safe-area-inset-right);
+        -webkit-backdrop-filter: blur(8px); backdrop-filter: blur(8px);
+      }
+      .hud .left, .hud .right { display: flex; align-items: center; gap: 8px; }
+      .hud button { cursor: pointer; padding: 10px 14px; border-radius: 10px; border: 1px solid #ffffff30; background: #ffffff18; color: #fff; font-size: 14px; min-width: 44px; min-height: 44px; }
+      .dot { width: 10px; height: 10px; border-radius: 50%; background: #888; }
+      .dot.listening { background: #2ecc71; box-shadow: 0 0 0 3px #2ecc7166; }
+      .hud .status { font-size: 12px; opacity: 0.9; }
+      .chips { position: fixed; bottom: calc(12px + env(safe-area-inset-bottom)); left: calc(12px + env(safe-area-inset-left)); right: calc(12px + env(safe-area-inset-right)); display: flex; gap: 8px; flex-wrap: wrap; justify-content: center; z-index: 10; }
+      .chip { padding: 10px 12px; background: rgba(0,0,0,0.35); color: #fff; border: 1px solid #ffffff30; border-radius: 999px; min-width: 44px; min-height: 44px; }
+      .overlay { position: fixed; inset: 0; display: none; align-items: center; justify-content: center; background: rgba(0,0,0,0.5); color: #fff; z-index: 20; }
+      .overlay.show { display: flex; }
+      .spinner { width: 24px; height: 24px; border: 3px solid #ffffff40; border-top-color: #fff; border-radius: 50%; animation: spin 1s linear infinite; }
+      @keyframes spin { to { transform: rotate(360deg); } }
+      @media (orientation: landscape) and (max-height: 480px) {
+        .hud { gap: 6px; }
+        .hud button { padding: 8px 10px; font-size: 13px; }
+        .chips { bottom: 8px; }
+      }
+    </style>
+    <!-- Babylon.js (global) -->
+    <script src="https://cdn.babylonjs.com/babylon.js"></script>
+  </head>
+  <body>
+    <div class="hud" id="hud">
+      <div class="left">
+        <span class="dot" id="micDot" title="Mic status"></span>
+        <button id="toggleBtn">Enable Voice</button>
+        <button id="pttBtn">Hold‑to‑Talk</button>
+        <button id="greetBtn">Greet</button>
+      </div>
+      <div class="right">
+        <button id="qualityBtn" title="Toggle quality">Quality: High</button>
+        <button id="vrBtn">Enter VR</button>
+      </div>
+    </div>
+    <div class="chips" id="chips"></div>
+    <div class="overlay" id="loadingOverlay"><div class="spinner" aria-label="Loading"></div></div>
+    <canvas id="renderCanvas"></canvas>
+    <script type="module" src="./app.js"></script>
+  </body>
+  </html>

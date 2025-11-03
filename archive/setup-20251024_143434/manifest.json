@@ -1,0 +1,14 @@
+{
+  "experiences": [
+    {
+      "id": "meta-model",
+      "label": "Meta model",
+      "stereo": true
+    },
+    {
+      "id": "skywalk",
+      "label": "Skywalk",
+      "stereo": false
+    }
+  ]
+}

@@ -1,0 +1,12 @@
+      root.position.copyFrom(v);
+      try{ root.lookAt(Vector3.Zero()); }catch{}
+    }
+  }
+  function buildHotspotsFor(node){
+    clearHotspots();
+    // Build for both 2D and XR roots so controller rays can pick in VR
+    buildHotspotsInRoot(node, hotspotRoot,   /*flipXLocal*/ FLIP_X, /*isXR*/ false);
+    buildHotspotsInRoot(node, hotspotRootXR, /*flipXLocal*/ FLIP_X, /*isXR*/ true);
+  }
+
+  // 2D pick

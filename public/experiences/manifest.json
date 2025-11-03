@@ -1,0 +1,19 @@
+{
+  "experiences": [
+    {
+      "id": "digital-twin",
+      "label": "Digital Twin",
+      "stereo": false
+    },
+    {
+      "id": "meta-model",
+      "label": "Meta model",
+      "stereo": true
+    },
+    {
+      "id": "skywalk",
+      "label": "Skywalk",
+      "stereo": false
+    }
+  ]
+}

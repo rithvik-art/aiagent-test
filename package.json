@@ -1,0 +1,38 @@
+{
+    "name": "unified-experience",
+    "version": "1.0.0",
+    "description": "",
+    "main": "agent.js",
+    "scripts": {
+        "test": "echo \"Error: no test specified\" && exit 1",
+        "dev": "vite",
+        "dev:http": "set DEV_HTTPS=0&& vite",
+        "build": "vite build",
+        "preview": "vite preview",
+        "generate:manifest": "node ./scripts/generate-experience-manifest.mjs",
+        "predev": "npm run generate:manifest",
+        "prebuild": " npm run generate:manifest && npm run make:fallbacks",
+        "prepreview": "npm run generate:manifest",
+        "make:fallbacks": "node ./scripts/make-jpeg-fallbacks.mjs",
+        "make:mobile": "node ./scripts/make-mobile-panos.mjs"
+    },
+    "keywords": [],
+    "author": "",
+    "license": "ISC",
+    "type": "module",
+    "devDependencies": {
+        "@vitejs/plugin-basic-ssl": "^2.1.0",
+        "@vitejs/plugin-legacy": "^7.2.1",
+        "rollup": "^4.52.5",
+        "sharp": "^0.33.5",
+        "vite": "^7.1.4"
+    },
+    "dependencies": {
+        "@babylonjs/core": "^8.26.0",
+        "@babylonjs/loaders": "^8.26.0"
+    },
+    "overrides": {
+        "semver": "7.5.4"
+    },
+    "private": "true"
+}

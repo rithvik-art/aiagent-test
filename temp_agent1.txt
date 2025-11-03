@@ -1,0 +1,200 @@
+// agent.js — Agent with multi-viewer mirror grid (bottom-right), camera-driven look
+// 2D stays mono (cropped if the source is TB). XR uses true TB stereo via PhotoDome.
+
+import {
+  Engine, Scene, FreeCamera, WebXRState, Vector3, MeshBuilder, Mesh, Color4,
+  StandardMaterial, Texture, Material, TransformNode, Color3, PointerEventTypes, Viewport, Ray
+} from "@babylonjs/core";
+import "@babylonjs/loaders";
+import { PhotoDome } from "@babylonjs/core/Helpers/photoDome";
+import { loadWalkthrough, buildMinimapDOM } from "./walkthrough-loader.js";
+
+/* logs */
+function LOG(){ try{ console.log.apply(console, arguments); }catch{} }
+function stamp(){ return new Date().toISOString().split("T")[1].slice(0,12); }
+function A(tag, obj){ LOG("[AGENT]", stamp(), tag, obj||""); }
+
+/* constants */
+const FLIP_U = true, FLIP_X = true;
+const DOME_DIAMETER = 2000, FLOOR_HEIGHT_M = 3.0;
+const NAV_DUR_MS = 550, NAV_PUSH_M = 3.0;
+let MIRROR_YAW_SIGN = 1;
+let MIRROR_PITCH_SIGN = 1; // 1 for same direction, -1 to invert if needed
+
+/* env */
+let BASE_URL = (import.meta?.env?.BASE_URL ?? "/");
+function toWs(url){ try{ if(!url) return null; const s=String(url); return s.replace(/^http(s?):/i, 'ws$1:'); }catch{ return url; } }
+const WS_PRIMARY = toWs(import.meta?.env?.VITE_WS_URL || "wss://vrsync.dev.opensky.co.in/");
+const WS_FALLBACK = toWs(import.meta?.env?.VITE_WS_URL_SECONDARY || import.meta?.env?.VITE_WS_FALLBACK || "https://22abcd9c-f607-41d5-9109-203a6cf0b79e-00-3nw6aihj3adm4.sisko.replit.dev/");
+function expandWs(u){ if(!u) return []; try{ const url=new URL(u); const list=[u]; const hasPath=url.pathname && url.pathname!=='/' && url.pathname!==''; if(!hasPath){ list.push((u.endsWith('/')?u.slice(0,-1):u)+"/ws"); } return list; }catch{ return [u]; } }
+
+// WebP support
+const SUPPORTS_WEBP = (() => { try { const c = document.createElement('canvas'); return c.toDataURL && c.toDataURL('image/webp').indexOf('image/webp') !== -1; } catch { return false; } })();
+const chooseFile = (f) => SUPPORTS_WEBP ? f : f.replace(/\.webp$/i, '.jpg');
+
+const rad = d => d*Math.PI/180;
+const v3arr = v => [v.x,v.y,v.z];
+const expNameFrom = base => { const p=base.split("/").filter(Boolean); return p[p.length-1]||"amenities"; };
+const UA = (navigator.userAgent || "").toLowerCase();
+const IS_IOS = /iphone|ipad|ipod|ios/.test(UA);
+const IS_ANDROID = /android/.test(UA);
+const IS_MOBILE = IS_IOS || IS_ANDROID || /mobile/.test(UA);
+const CROSSFADE_MODE = (import.meta?.env?.VITE_CROSSFADE || 'auto').toLowerCase();
+function wantsCrossfade(){ if (CROSSFADE_MODE==='on') return true; if (CROSSFADE_MODE==='off') return false; return !IS_IOS; }
+
+/* 2D texture mapping (mono crop for TB stereo) */
+function mapFor2D(tex, stereo, flipU){
+  if (!tex) return;
+  tex.coordinatesMode = Texture.FIXED_EQUIRECTANGULAR_MODE;
+  tex.uScale  = flipU ? -1 : 1;
+  tex.uOffset = flipU ?  1 : 0;
+  tex.vScale  = stereo ? -0.5 : -1.0; // bottom half = right eye (adjust if top)
+  tex.vOffset = 1.0;
+  tex.wrapU = Texture.CLAMP_ADDRESSMODE;
+  tex.wrapV = Texture.CLAMP_ADDRESSMODE;
+  // aniso set when texture is created based on quality profile
+}
+
+function createMetaLookup(list = []){
+  const map = new Map();
+  for (const entry of list){
+    const id = typeof entry?.id === 'string' ? entry.id.trim() : '';
+    if (id) map.set(id, entry);
+  }
+  return map;
+}
+
+export async function initAgent(opts = {}){
+  const roomId = (opts.roomId && String(opts.roomId).trim()) || "demo";
+  const exp    = (opts.exp    && String(opts.exp).trim()) || "amenities";
+  const experiencesMeta = Array.isArray(opts.experiencesMeta) ? opts.experiencesMeta : [];
+  const metaById = createMetaLookup(experiencesMeta);
+
+  let BASE = (BASE_URL + "experiences/" + exp).replace(/\/{2,}/g,"/");
+  let PANOS_DIR = "panos";
+  const expName  = () => expNameFrom(BASE);
+  const isStereo = () => Boolean(metaById.get(expName())?.stereo);
+  const panoPath = (dir, file) => (BASE + "/" + dir + "/" + chooseFile(file)).replace(/\/{2,}/g,"/");
+  const panoUrl  = file => panoPath(PANOS_DIR, file);
+  const WS_LIST = Array.from(new Set([ ...expandWs(WS_PRIMARY), ...expandWs(WS_FALLBACK) ].filter(Boolean)));
+  A("init", { roomId, exp:expName(), BASE, ws: WS_LIST });
+
+  /* engine/scene */
+  const canvas = document.getElementById("renderCanvas");
+  const engine = new Engine(canvas, true, {
+    disableWebGL2Support: IS_IOS,
+    powerPreference: IS_IOS ? "low-power" : "high-performance",
+    premultipliedAlpha: false,
+    preserveDrawingBuffer: false,
+    stencil: false
+  });
+  try{
+    // Force HQ on request; otherwise cap to 2x for perf
+    function determineDpr(){
+      const qs = new URLSearchParams(location.search);
+      const forceHQ = (qs.get('hq') === '1') || (String(import.meta?.env?.VITE_FORCE_HQ||'')==='1') || ((qs.get('q')||'').toLowerCase()==='high');
+      const dpr = Math.max(1, window.devicePixelRatio || 1);
+      const cap = forceHQ ? 3 : 2;
+      const target = Math.min(cap, dpr);
+      return IS_IOS ? Math.min(1.2, target) : target;
+    }
+    engine.setHardwareScalingLevel(1 / determineDpr());
+  }catch{}
+
+  function getQuality(){
+    try{
+      if (IS_IOS) return { mips:false, sampling:Texture.BILINEAR_SAMPLINGMODE, aniso:1 };
+      const qs = new URLSearchParams(location.search);
+      const override = (qs.get('q') || import.meta?.env?.VITE_QUALITY || 'auto').toLowerCase();
+      if (override==='high') return { mips:true, sampling:Texture.TRILINEAR_SAMPLINGMODE, aniso:8 };
+      if (override==='low')  return { mips:false, sampling:Texture.BILINEAR_SAMPLINGMODE, aniso:1 };
+      const conn = navigator.connection || navigator.webkitConnection || navigator.mozConnection;
+      const eff = String(conn?.effectiveType||'').toLowerCase();
+      const save = Boolean(conn?.saveData);
+      const slow = /^(slow-)?2g|3g$/.test(eff) || save;
+      const mem = Number(navigator.deviceMemory || 4);
+      if (slow || mem <= 2) return { mips:false, sampling:Texture.BILINEAR_SAMPLINGMODE, aniso:1 };
+      return { mips:true, sampling:Texture.TRILINEAR_SAMPLINGMODE, aniso:8 };
+    }catch{ return { mips:true, sampling:Texture.TRILINEAR_SAMPLINGMODE, aniso:8 }; }
+  }
+  const scene  = new Scene(engine);
+  scene.clearColor = new Color4(0,0,0,1);
+
+  const cam = new FreeCamera("cam", new Vector3(0,0,0), scene);
+  cam.attachControl(canvas, true);
+  cam.inputs.clear();
+  cam.fov=1.1; cam.minZ=0.1; cam.maxZ=50000; cam.layerMask=0x1;
+  scene.activeCamera = cam;
+
+  /* data */
+  try{ window.dispatchEvent(new CustomEvent('loading:show', { detail:{ label: 'Loading tour…' } })); }catch{}
+  let { data, nodesById, startNodeId } = await loadWalkthrough((BASE + "/walkthrough.json").replace(/\/{2,}/g,"/"));
+  try{ window.dispatchEvent(new CustomEvent('loading:hide')); }catch{}
+  let currentNodeId = startNodeId;
+
+  async function maybeSelectMobilePanoDir(){
+    const node = nodesById.get(startNodeId) || (nodesById.size ? nodesById.values().next().value : null);
+    const file = node?.file;
+    if (!file) return;
+    const caps = engine.getCaps?.() || {};
+    const maxTexture = Number(caps.maxTextureSize) || 0;
+    const dpr = Math.max(1, window.devicePixelRatio || 1);
+    const needsMobile = IS_IOS || maxTexture <= 8192 || (IS_ANDROID && dpr >= 2.5);
+    if (!needsMobile) return;
+    const candidates = [];
+    if (IS_IOS || maxTexture <= 7168) candidates.push("panos-mobile-6k");
+    candidates.push("panos-mobile");
+    for (const dir of candidates){
+      const url = panoPath(dir, file);
+      try{
+        let res = await fetch(url, { method: "HEAD", cache: "no-store" });
+        if (!res?.ok && res?.status === 405){
+          res = await fetch(url, { method: "GET", cache: "no-store" });
+        }
+        if (res?.ok){
+          PANOS_DIR = dir;
+          console.info("[AGENT] Using mobile panorama folder:", dir);
+          return;
+        }
+      }catch{}
+    }
+  }
+  await maybeSelectMobilePanoDir();
+
+  /* floors */
+  const floorIndex=new Map(), floorCenter=new Map();
+  function rebuildFloorMaps(){
+    floorIndex.clear(); floorCenter.clear();
+    data.floors.forEach((f,i)=>floorIndex.set(f.id,i));
+    for (const f of data.floors){
+      const on=data.nodes.filter(n=>n.floorId===f.id);
+      let minX=Infinity,maxX=-Infinity,minY=Infinity,maxY=-Infinity;
+      for (const n of on){ if(typeof n.x==="number"&&typeof n.y==="number"){ if(n.x<minX)minX=n.x; if(n.x>maxX)maxX=n.x; if(n.y<minY)minY=n.y; if(n.y>maxY)maxY=n.y; } }
+      const ppm=f.pxPerMeter||100; const cx=isFinite(minX)?(minX+maxX)/2:0; const cy=isFinite(minY)?(minY+maxY)/2:0;
+      floorCenter.set(f.id,{cx,cy,ppm});
+    }
+  }
+  rebuildFloorMaps();
+  const nodeWorldPos = (n)=>{ const f=floorCenter.get(n.floorId)||{cx:0,cy:0,ppm:100}; const idx=floorIndex.get(n.floorId)??0; return new Vector3((n.x-f.cx)/f.ppm, idx*FLOOR_HEIGHT_M, (n.y-f.cy)/f.ppm); };
+
+  /* main dome */
+  const worldRoot = new TransformNode("worldRoot", scene);
+  const dome = MeshBuilder.CreateSphere("dome",{diameter:DOME_DIAMETER,segments:64,sideOrientation:Mesh.BACKSIDE},scene);
+  dome.parent=worldRoot; if(FLIP_X) dome.rotation.x=Math.PI; dome.layerMask=0x1; dome.isPickable=false;
+  const domeMat=new StandardMaterial("panoMat",scene);
+  domeMat.disableLighting=true; domeMat.backFaceCulling=false;
+  domeMat.transparencyMode=Material.MATERIAL_ALPHABLEND; domeMat.disableDepthWrite=true;
+  dome.material=domeMat; dome.renderingGroupId=0;
+
+  // Secondary dome for optional crossfade
+  const crossDome = MeshBuilder.CreateSphere("domeX",{diameter:DOME_DIAMETER,segments:64,sideOrientation:Mesh.BACKSIDE},scene);
+  crossDome.parent=worldRoot; if(FLIP_X) crossDome.rotation.x=Math.PI; crossDome.layerMask=0x1; crossDome.isPickable=false; crossDome.isVisible=false;
+  const crossMat=new StandardMaterial("panoMatX",scene);
+  crossMat.disableLighting=true; crossMat.backFaceCulling=false; crossMat.alpha=0;
+  crossMat.transparencyMode=Material.MATERIAL_ALPHABLEND; crossMat.disableDepthWrite=true;
+  crossDome.material=crossMat; crossDome.renderingGroupId=1;
+
+  /* textures */
+  // LRU texture cache to prevent unbounded GPU memory growth on mobile
+  const texCache=new Map(), inFlight=new Map();
+  const TEX_LIMIT = IS_IOS ? 6 : (IS_ANDROID ? 10 : 16); // fewer on constrained GPUs

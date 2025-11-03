@@ -1,0 +1,136 @@
+      .mirror-badge{
+        position:absolute; width:22px; height:22px; border-radius:999px;
+        background:#F3C400; color:#1a1a1a; font:700 14px/22px Inter, ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto;
+        text-align:center; box-shadow:0 2px 6px rgba(0,0,0,.35);
+      }      .btn-circle svg{ width:20px; height:20px; display:block; stroke: currentColor; fill: none }
+
+      /* Small-screen tuning (portrait and small screens) */
+      @media (max-width: 480px), (max-height: 640px) {
+        #bottomBar{ gap:8px; padding:8px 10px; border-radius:14px; }
+        .select-btn{ min-width: 140px; padding:10px 12px; padding-right:36px; font-size:13px; }
+        .select-list li{ padding:10px 12px; font-size:13px; }
+        #dpad{ gap:6px; grid-template-columns: 34px 34px 34px; grid-template-rows: 34px 34px 34px; }
+        #dpad button{ width:34px; height:34px; font-size:14px; border-radius:10px; }
+        .btn-circle{ width:30px; height:30px; font-size:14px; border-radius:8px; }
+        #zoomWrap{ gap:4px; }
+        #brandLogo img{ height:70px; }
+        .mini-wrap{ --pad: 8px; }
+        /* Show rotate overlay when portrait on narrow devices */
+        html[data-device="phone"][data-orient="portrait"] #rotateOverlay{ display:grid }
+      }
+
+      /* Landscape on phones: make controls even smaller and keep bottom bar compact */
+      @media (orientation: landscape) and (max-height: 480px) {
+        #bottomBar{ gap:6px; padding:6px 8px; border-radius:12px; }
+        .select-btn{ min-width: 120px; padding:8px 10px; padding-right:30px; font-size:12px; }
+        #dpad{ gap:4px; grid-template-columns: 28px 28px 28px; grid-template-rows: 28px 28px 28px; }
+        #dpad button{ width:28px; height:28px; font-size:12px; border-radius:8px; }
+        .btn-circle{ width:26px; height:26px; font-size:12px; border-radius:7px; }
+        #zoomWrap{ gap:3px; }
+      }
+      /* Loading overlay (bar only) */
+      #preloadOverlay{ position:fixed; inset:0; display:none; place-items:center; z-index:99999; background:rgba(0,0,0,.62); -webkit-backdrop-filter: blur(1.5px); backdrop-filter: blur(1.5px); opacity:0; transition:opacity .15s ease }
+      #preloadOverlay[aria-busy="true"]{ display:grid; opacity:1 }
+      .loader-card{ width:min(70vw,420px); background:#0f1424; border:1px solid rgba(32,35,59,.55); border-radius:14px; padding:16px }
+      .bar{ height:10px; border-radius:999px; background:#1d2540; overflow:hidden; border:1px solid rgba(255,255,255,.08) }
+      .bar > i{ display:block; height:100%; width:0%; background:linear-gradient(90deg, var(--brand-yellow), #ffdd55); border-radius:inherit; transition:width .12s ease }
+    </style>
+    <link rel="preconnect" href="https://vrsync.dev.opensky.co.in" crossorigin>
+    <!-- iOS PWA fullscreen when added to Home Screen -->
+    <meta name="apple-mobile-web-app-capable" content="yes">
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  </head>
+  <body>
+    <canvas id="renderCanvas"></canvas>
+    <!-- Exit Fullscreen (shows only when in fullscreen) -->
+    <button id="exitFSBtn" type="button" aria-label="Exit fullscreen">Exit</button>
+    <!-- Loading overlay (centered bar; no text) -->
+    <div id="preloadOverlay" aria-hidden="true">
+      <div class="loader-card">
+        <div class="bar"><i id="barFill" style="width:0%"></i></div>
+      </div>
+    </div>
+
+    <!-- Project logo (top-left) -->
+    <div id="brandLogo"><img src="/assets/DESIGN%20LATTICE.jpg" alt="Design Lattice"></div>
+    <!-- Agent-only mirror badges; hidden on Viewer by app.js -->
+    <div id="mirrorHud" aria-hidden="true"></div>
+    <!-- Bottom-left controls -->
+    <div id="bottomBar" hidden>
+      <!-- Custom dropdown (live selector) -->
+      <div class="select" id="expSelectLiveWrap" data-open="false">
+        <button type="button" class="select-btn" id="expBtn">
+          <span id="expLabel">Select experience</span>
+          <svg width="14" height="10" viewBox="0 0 12 8" xmlns="http://www.w3.org/2000/svg"><path fill="#F3C400" d="M1 1l5 6 5-6"/></svg>
+        </button>
+        <ul class="select-list" id="expList" role="listbox"></ul>
+        <!-- Hidden native select used by JS -->
+        <select id="expSelectLive" hidden></select>
+      </div>
+
+<!-- Controls removed: dpad + zoom -->
+
+      <!-- Autoplay Tour Controls -->
+      <div id="tourWrap" aria-label="Autoplay" style="display:flex;gap:6px;margin-left:6px">
+        <button id="tourStart" class="btn-circle" title="Start tour" aria-label="Start tour">?</button>
+        <button id="tourPause" class="btn-circle" title="Pause/Resume tour" aria-label="Pause/Resume">?</button>
+        <button id="tourPrev"  class="btn-circle" title="Previous stop" aria-label="Previous">?</button>
+        <button id="tourNext"  class="btn-circle" title="Next stop" aria-label="Next">?</button>
+        <button id="tourStop"  class="btn-circle" title="Stop tour" aria-label="Stop">¦</button>
+      </div>
+      <button id="btnMini"   class="btn-circle" title="Hide/Show minimap" aria-label="Toggle minimap"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 6l6-3 6 3 6-3v14l-6 3-6-3-6 3V3z"/><path d="M9 3v14M15 6v14"/></svg></button>
+      <button id="btnMirror" class="btn-circle" title="Hide/Show mirror"  aria-label="Toggle mirror"><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="8" width="12" height="9" rx="2"/><rect x="9" y="4" width="12" height="9" rx="2"/></svg></button>
+      
+      <button id="btnFS"     class="btn-circle" title="Fullscreen"        aria-label="Fullscreen">?</button>
+    </div>
+
+    <!-- Join Gate (heading removed) -->
+    <div id="roleGate">
+      <div class="gate-card">
+        <div class="gate-row">
+          <input id="roomInput" placeholder="Enter a room number" />
+          <!-- Custom dropdown in the gate (yellow highlight) -->
+          <div class="select drop-down" id="gateExpWrap" data-open="false" style="flex:1">
+            <button type="button" class="select-btn" id="gateExpBtn">
+              <span id="gateExpLabel">Select experience</span>
+              <svg width="14" height="10" viewBox="0 0 12 8" xmlns="http://www.w3.org/2000/svg"><path fill="#F3C400" d="M1 1l5 6 5-6"/></svg>
+            </button>
+            <ul class="select-list" id="gateExpList" role="listbox"></ul>
+            <!-- Hidden native select the app already uses -->
+            <select id="expSelect" hidden></select>
+          </div>
+        </div>
+
+        <div class="gate-actions" style="display:flex;gap:10px;margin-top:12px; align-items:center; flex-wrap:wrap">
+          <button id="btnGuide" class="btn secondary">Guide</button>
+          <button id="btnViewer" class="btn">Viewer</button>
+        </div>
+        <div style="opacity:.85;font-size:12px;margin-top:8px">
+          To view the property in self exploratory mode join as <b>Guide</b>.
+        </div>
+      </div>
+    </div>
+
+    <!-- Rotate overlay (phones portrait only) -->
+    <div id="rotateOverlay" aria-hidden="true">
+      <div class="card">
+        <h2>Rotate Your Phone</h2>
+        <p>Please turn your device to landscape to enjoy the experience.</p>
+        <button id="tapStart" type="button">Tap to Start</button>
+      </div>
+    </div>
+
+    <script type="module" src="/src/app.js"></script>
+
+    <script>
+      if ('serviceWorker' in navigator) {
+        try {
+          const host = location.hostname || '';
+          const isIPv4 = /^\d+\.\d+\.\d+\.\d+$/.test(host);
+          const allow = (window.isSecureContext === true) && !isIPv4 && host !== 'localhost' && host !== '127.0.0.1';
+          if (allow) navigator.serviceWorker.register('/sw.js').catch(()=>{});
+        } catch {}
+      }
+    </script>
+  </body>
+</html>

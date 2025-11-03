@@ -1,0 +1,21 @@
+{
+  "id": "default",
+  "durationTargetSec": 720,
+  "steps": [
+    { "exp": "skywalk", "nodeId": "pano-1", "dwellSec": 15 },
+    { "exp": "skywalk", "nodeId": "pano-2", "dwellSec": 15 },
+    { "exp": "skywalk", "nodeId": "pano-3", "dwellSec": 15 },
+    { "exp": "skywalk", "nodeId": "pano-4", "dwellSec": 15 },
+
+    { "exp": "digital-twin", "zoneId": "zone-1", "dwellSec": 12 },
+    { "exp": "digital-twin", "zoneId": "zone-2", "dwellSec": 12 },
+
+    { "exp": "meta-model", "zoneId": "zone-1", "dwellSec": 12 },
+    { "exp": "meta-model", "zoneId": "zone-2", "dwellSec": 12 },
+    { "exp": "meta-model", "zoneId": "zone-3", "dwellSec": 12 },
+    { "exp": "meta-model", "zoneId": "zone-4", "dwellSec": 12 },
+    { "exp": "meta-model", "zoneId": "zone-5", "dwellSec": 12 },
+    { "exp": "meta-model", "zoneId": "zone-6", "dwellSec": 12 },
+    { "exp": "meta-model", "zoneId": "zone-7", "dwellSec": 12 }
+  ]
+}

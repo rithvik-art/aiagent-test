@@ -1,0 +1,80 @@
+  }
+  let lastLoadedFile = null; // Track last loaded file to prevent unnecessary reloads
+  let loadInProgress = false; // Prevent concurrent loads
+  let targetNodeId = null; // Track latest target for sync during rapid navigation
+  async function refreshDomeForCurrentNode() {
+    const node = nodesById.get(currentNodeId);
+    if (!node) return;
+    // Track the target we're loading for sync check
+    const loadTarget = currentNodeId;
+    targetNodeId = loadTarget;
+
+    // CRITICAL FIX: Don't reload if same file (prevents VR blinking)
+    if (node.file === lastLoadedFile && loadTarget === targetNodeId) return;
+
+    // Prevent concurrent loads (causes stuck black screens)
+    if (loadInProgress) {
+      console.warn('[VIEWER] Load already in progress, skipping:', node.file);
+      return;
+    }
+    loadInProgress = true;
+
+    // Safety timeout: reset flag after 5 seconds to prevent permanent stuck
+    const safetyTimeout = setTimeout(() => {
+      console.error('[VIEWER] Load timeout - forcing reset');
+      loadInProgress = false;
+    }, 5000);
+    try {
+      if (inXR) {
+        await setVrPano(node.file);
+        // CHECK: Are we still trying to load this node, or did agent move again?
+        if (loadTarget !== targetNodeId) {
+          console.warn('[VIEWER] Target changed during load, skipping apply:', loadTarget, '→', targetNodeId);
+          return; // Don't apply outdated panorama
+        }
+        dome.setEnabled(false);
+        lastLoadedFile = node.file; // Mark as loaded only if we applied it
+      } else {
+        try{ vrDomes.forEach(d=>{ if(d) d.mesh.isVisible=false; }); }catch{}
+        // DON'T show loading overlay - causes black screens
+        const tex = await getTexture(node.file);
+        // CHECK: Are we still trying to load this node?
+        if (loadTarget !== targetNodeId) {
+          console.warn('[VIEWER] Target changed during load, skipping apply:', loadTarget, '→', targetNodeId);
+          return; // Don't apply outdated panorama
+        }
+        // CORRECT: In 2D, CROP stereo (show bottom half only for mono view)
+        // In VR, PhotoDome handles full stereo automatically
+        mapFor2D(tex, isStereo());
+        domeMat.emissiveTexture = tex;
+        dome.setEnabled(true);
+        // retention: current + previous + warm next neighbors
+        const prevKey = lastLoadedFile && lastLoadedFile!==node.file ? `${BASE}|${lastLoadedFile}` : null;
+        const prevFile = lastLoadedFile && lastLoadedFile!==node.file ? lastLoadedFile : null;
+        lastLoadedFile = node.file; // Mark as loaded only if we applied it
+        const curKey = `${BASE}|${node.file}`;
+        const keep = new Set([curKey]);
+        const urls = [panoUrl(node.file)];
+        if (prevKey){ keep.add(prevKey); try{ if (prevFile) urls.push(panoUrl(prevFile)); }catch{} }
+        // Warm neighbors asynchronously; retain them as well
+        const neigh = neighborInfoFor(node, 2);
+        neigh.files.forEach(f=>{ try{ getTexture(f).catch(()=>{}); }catch{} });
+        neigh.keys.forEach(k=>keep.add(k));
+        urls.push(...neigh.urls);
+        retainOnly(keep);
+        retainSW(urls);
+      }
+    } catch (error) {
+      console.error('[VIEWER] Failed to load panorama:', error);
+      lastLoadedFile = null; // Reset so it can retry
+    } finally {
+      clearTimeout(safetyTimeout);
+      loadInProgress = false;
+    }
+  }
+  xr?.baseExperience?.onStateChangedObservable?.add((s)=>{
+    const wasInXR = inXR;
+    inXR = (s === WebXRState.IN_XR);
+    try {
+      if (inXR) {
+        // Improve clarity in XR: disable downscaling while in VR

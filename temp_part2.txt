@@ -1,0 +1,250 @@
+  function retainSW(urls){ try{ navigator.serviceWorker?.controller?.postMessage({ type:'retain', urls }); }catch{} }
+
+  function neighborInfoFor(n, limit = (IS_IOS ? 0 : 2)){
+    const out = { files: [], keys: [], urls: [] };
+    try{
+      const hs = Array.isArray(n?.hotspots) ? n.hotspots : [];
+      for (const h of hs){
+        if (!h?.to || !nodesById.has(h.to)) continue;
+        const f = nodesById.get(h.to).file;
+        if (!f || out.files.includes(f)) continue;
+        out.files.push(f);
+        out.keys.push(`${BASE}|${f}`);
+        out.urls.push(panoUrl(f));
+        if (out.files.length >= limit) break;
+      }
+    }catch{}
+    return out;
+  }
+  function retainOnly(keep){
+    try{
+      for (const [k, tex] of texCache.entries()){
+        if (!keep.has(k)) { try{ tex?.dispose?.(); }catch{} texCache.delete(k); }
+      }
+    }catch{}
+  }
+  function retainSW(urls){ try{ navigator.serviceWorker?.controller?.postMessage({ type:'retain', urls }); }catch{} }
+  function purgeTextures(){
+    try{ for (const [k,tex] of texCache.entries()){ try{ tex?.dispose?.(); }catch{} } texCache.clear(); }catch{}
+  }
+  async function getTexture(file) {
+    const key = `${BASE}|${file}`;
+    if (texCache.has(key)) { touchLRU(key); return texCache.get(key); }
+    if (inFlight.has(key)) return inFlight.get(key);
+    const q = getQuality();
+    const tex = new Texture(panoUrl(file), scene, !q.mips, false, q.sampling);
+    try { tex.anisotropicFilteringLevel = q.aniso; } catch {}
+    const p = new Promise(res => { tex.isReady() ? res(tex) : tex.onLoadObservable.addOnce(()=>res(tex)); }).then((t)=>{ texCache.set(key,t); evictIfNeeded(key); return t; });
+    inFlight.set(key, p);
+    p.finally(()=>inFlight.delete(key));
+    return p;
+  }
+  function mapFor2D(tex, stereo) {
+    if (!tex) return;
+    // Ensure equirect mapping like Agent (prevents full TB showing)
+    try { tex.coordinatesMode = Texture.FIXED_EQUIRECTANGULAR_MODE; } catch {}
+    tex.uScale  = FLIP_U ? -1 : 1;
+    tex.uOffset = FLIP_U ?  1 : 0;
+    tex.vScale  = stereo ? -0.5 : -1.0;
+    tex.vOffset = 1.0;
+    tex.wrapU = Texture.CLAMP_ADDRESSMODE;
+    tex.wrapV = Texture.CLAMP_ADDRESSMODE;
+    // aniso set in getTexture()
+  }
+
+  // Release GPU memory when tab is hidden/backgrounded (mobile stability)
+  try{
+    document.addEventListener('visibilitychange', ()=>{ if (document.visibilityState !== 'visible') purgeTextures(); });
+    addEventListener('pagehide', ()=>purgeTextures());
+  }catch{}
+
+  // Apply initial orientation
+  applyCam();
+
+  /* WebXR (optional for viewer) */
+  let xr = null; let inXR = false;
+  // Double-buffered PhotoDome to avoid black frames in VR
+  const vrDomes = [null, null];
+  let activeVr = 0;
+  let prevHSL = null; // previous hardware scaling level (for clarity in XR)
+  try{
+    if (navigator?.xr){
+      // Allow reference space override via query param: ?xrRef=local | local-floor | bounded-floor
+      const qs = new URLSearchParams(location.search);
+      const xrRef = (qs.get('xrRef') || 'local-floor');
+      xr = await scene.createDefaultXRExperienceAsync({
+        uiOptions: { sessionMode: "immersive-vr", referenceSpaceType: xrRef },
+        optionalFeatures: true
+      });
+      // Avoid network hand-mesh fetches and model parser noise
+      try{ const fm = xr?.baseExperience?.featuresManager; fm?.enableFeature?.('hand-tracking','latest',{ xrInput: xr?.baseExperience?.input, jointMeshes:false, doNotLoadHandMesh:true }); }catch{}
+    }
+  }catch{}
+  const ensureVrDome = (index) => {
+    if (vrDomes[index]) return vrDomes[index];
+    const dome = new PhotoDome("pd_"+index, panoUrl(nodesById?.get?.(currentNodeId)?.file || ""), { size: DOME_DIAMETER }, scene);
+    dome.mesh.isVisible = false;
+    // CRITICAL FIX: Parent to worldRoot to prevent drift in VR
+    dome.mesh.parent = worldRoot;
+    // Initial stereo mode will be set on use
+    vrDomes[index] = dome;
+    return dome;
+  };
+  const setVrStereoMode = (dome) => {
+    const mode = isStereo() ? PhotoDome.MODE_TOPBOTTOM : PhotoDome.MODE_MONOSCOPIC;
+    try { if ("stereoMode" in dome) dome.stereoMode = mode; } catch {}
+    try { if ("imageMode"  in dome) dome.imageMode  = mode; } catch {}
+  };
+  async function loadUrlIntoDome(dome, url){
+    return new Promise((resolve)=>{
+      if (!dome?.photoTexture) { resolve(); return; }
+      let done = false;
+      const tex = dome.photoTexture;
+      const cleanup = () => { if (obs){ try { tex.onLoadObservable.remove(obs); } catch {} } };
+      const obs = tex.onLoadObservable.add(()=>{ done = true; cleanup(); resolve(); });
+      try { tex.updateURL(url); } catch { cleanup(); resolve(); }
+      // Increased timeout for slow connections (was 1200ms, now 3000ms)
+      setTimeout(()=>{ if(!done){ console.warn('[VIEWER] Texture load timeout:', url); cleanup(); resolve(); } }, 3000);
+    }).then(()=>{
+      try { const tex = dome.photoTexture; if (tex) { tex.anisotropicFilteringLevel = 8; } } catch {}
+    });
+  }
+  async function setVrPano(file){
+    const url = panoUrl(file);
+    const next = 1 - activeVr;
+    const nextDome = ensureVrDome(next);
+    // DON'T show loading overlay in XR - it causes black screens
+    // Load texture in background while keeping current dome visible
+    await loadUrlIntoDome(nextDome, url);
+    // Re-apply stereo mode after URL update (some engines reset flags on new texture)
+    setVrStereoMode(nextDome);
+    // Swap visibility AFTER new dome is ready (atomic swap, no black frame)
+    nextDome.mesh.isVisible = true;
+    const curDome = vrDomes[activeVr];
+    if (curDome) curDome.mesh.isVisible = false;
+    activeVr = next;
+    try{ retainSW([url]); }catch{}
+  }
+  let lastLoadedFile = null; // Track last loaded file to prevent unnecessary reloads
+  let loadInProgress = false; // Prevent concurrent loads
+  let targetNodeId = null; // Track latest target for sync during rapid navigation
+  async function refreshDomeForCurrentNode() {
+    const node = nodesById.get(currentNodeId);
+    if (!node) return;
+    // Track the target we're loading for sync check
+    const loadTarget = currentNodeId;
+    targetNodeId = loadTarget;
+
+    // CRITICAL FIX: Don't reload if same file (prevents VR blinking)
+    if (node.file === lastLoadedFile && loadTarget === targetNodeId) return;
+
+    // Prevent concurrent loads (causes stuck black screens)
+    if (loadInProgress) {
+      console.warn('[VIEWER] Load already in progress, skipping:', node.file);
+      return;
+    }
+    loadInProgress = true;
+
+    // Safety timeout: reset flag after 5 seconds to prevent permanent stuck
+    const safetyTimeout = setTimeout(() => {
+      console.error('[VIEWER] Load timeout - forcing reset');
+      loadInProgress = false;
+    }, 5000);
+    try {
+      if (inXR) {
+        await setVrPano(node.file);
+        // CHECK: Are we still trying to load this node, or did agent move again?
+        if (loadTarget !== targetNodeId) {
+          console.warn('[VIEWER] Target changed during load, skipping apply:', loadTarget, '→', targetNodeId);
+          return; // Don't apply outdated panorama
+        }
+        dome.setEnabled(false);
+        lastLoadedFile = node.file; // Mark as loaded only if we applied it
+      } else {
+        try{ vrDomes.forEach(d=>{ if(d) d.mesh.isVisible=false; }); }catch{}
+        // DON'T show loading overlay - causes black screens
+        const tex = await getTexture(node.file);
+        // CHECK: Are we still trying to load this node?
+        if (loadTarget !== targetNodeId) {
+          console.warn('[VIEWER] Target changed during load, skipping apply:', loadTarget, '→', targetNodeId);
+          return; // Don't apply outdated panorama
+        }
+        // CORRECT: In 2D, CROP stereo (show bottom half only for mono view)
+        // In VR, PhotoDome handles full stereo automatically
+        mapFor2D(tex, isStereo());
+        domeMat.emissiveTexture = tex;
+        dome.setEnabled(true);
+        // retention: current + previous + warm next neighbors
+        const prevKey = lastLoadedFile && lastLoadedFile!==node.file ? `${BASE}|${lastLoadedFile}` : null;
+        const prevFile = lastLoadedFile && lastLoadedFile!==node.file ? lastLoadedFile : null;
+        lastLoadedFile = node.file; // Mark as loaded only if we applied it
+        const curKey = `${BASE}|${node.file}`;
+        const keep = new Set([curKey]);
+        const urls = [panoUrl(node.file)];
+        if (prevKey){ keep.add(prevKey); try{ if (prevFile) urls.push(panoUrl(prevFile)); }catch{} }
+        // Warm neighbors asynchronously; retain them as well
+        const neigh = neighborInfoFor(node, 2);
+        neigh.files.forEach(f=>{ try{ getTexture(f).catch(()=>{}); }catch{} });
+        neigh.keys.forEach(k=>keep.add(k));
+        urls.push(...neigh.urls);
+        retainOnly(keep);
+        retainSW(urls);
+      }
+    } catch (error) {
+      console.error('[VIEWER] Failed to load panorama:', error);
+      lastLoadedFile = null; // Reset so it can retry
+    } finally {
+      clearTimeout(safetyTimeout);
+      loadInProgress = false;
+    }
+  }
+  xr?.baseExperience?.onStateChangedObservable?.add((s)=>{
+    const wasInXR = inXR;
+    inXR = (s === WebXRState.IN_XR);
+    try {
+      if (inXR) {
+        // Improve clarity in XR: disable downscaling while in VR
+        prevHSL = engine.getHardwareScalingLevel?.() ?? null;
+        engine.setHardwareScalingLevel(1.0);
+      } else if (prevHSL != null) {
+        engine.setHardwareScalingLevel(prevHSL);
+      }
+    } catch {}
+    // Only refresh if we're transitioning modes (2D->VR or VR->2D), not on repeated state changes
+    if (wasInXR !== inXR) {
+      refreshDomeForCurrentNode();
+    }
+  });
+  // In XR mode, worldRoot should remain static (no updates from WebSocket)
+  // The PhotoDomes are parented to worldRoot and will follow XR camera automatically
+  function computeViewerPose(){
+    if (inXR && xr?.baseExperience?.camera){
+      const dir = xr.baseExperience.camera.getForwardRay().direction;
+      // FIX: Quest 3 coordinate alignment - use -x to prevent left/right drift
+      const yaw = Math.atan2(-dir.x, dir.z);
+      const pitch = Math.asin(dir.y);
+      return { yaw, pitch, mode: 'xr' };
+    }
+    return { yaw: cam.rotation.y, pitch: cam.rotation.x, mode: '2d' };
+  }
+
+  /* WebSocket: follow Guide (primary + fallback) */
+  const IGNORE_GUIDE_YAW = true; // viewer controls their own look; guide yaw only for Agent mirror
+  function toWs(url){ try{ if(!url) return null; const s=String(url); return s.replace(/^http(s?):/i, 'ws$1:'); }catch{ return url; } }
+  const WS_PRIMARY = toWs(import.meta?.env?.VITE_WS_URL || "wss://vrsync.dev.opensky.co.in/");
+  const WS_FALLBACK = toWs(import.meta?.env?.VITE_WS_URL_SECONDARY || import.meta?.env?.VITE_WS_FALLBACK || "https://22abcd9c-f607-41d5-9109-203a6cf0b79e-00-3nw6aihj3adm4.sisko.replit.dev/");
+  function expandWs(u){
+    if (!u) return [];
+    try{
+      const url=new URL(u);
+      const list=[u];
+      const hasPath = url.pathname && url.pathname !== '/' && url.pathname !== '';
+      if (!hasPath){ list.push((u.endsWith('/')?u.slice(0,-1):u)+"/ws"); }
+      return list;
+    }catch{ return [u]; }
+  }
+  const WS_LIST = Array.from(new Set([ ...expandWs(WS_PRIMARY), ...expandWs(WS_FALLBACK) ].filter(Boolean)));
+  let socket = null; let wsOpen=false; let lastPoseT=0; let poseObs=null; let wsIndex=0; let wsLockedIdx=-1;
+  (function connect(){
+    let retryMs=2000;
+    const idx = (wsLockedIdx>=0 ? wsLockedIdx : (wsIndex % WS_LIST.length));

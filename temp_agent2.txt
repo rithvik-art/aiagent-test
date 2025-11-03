@@ -1,0 +1,250 @@
+  const PREFETCH_LIMIT = IS_IOS ? 1 : 2;
+  function touchLRU(key){
+    if (!texCache.has(key)) return;
+    const val = texCache.get(key);
+    texCache.delete(key);
+    texCache.set(key, val);
+  }
+  function evictIfNeeded(currentKey){
+    try{
+      while (texCache.size > TEX_LIMIT){
+        const firstKey = texCache.keys().next().value;
+        if (!firstKey || firstKey === currentKey) break;
+        const tex = texCache.get(firstKey);
+        try{ tex?.dispose?.(); }catch{}
+        texCache.delete(firstKey);
+      }
+    }catch{}
+  }
+  function purgeTextures(){
+    try{
+      for (const [k,tex] of texCache.entries()){ try{ tex?.dispose?.(); }catch{} }
+      texCache.clear();
+    }catch{}
+  }
+  function retainOnly(keep){
+    try{
+      for (const [k, tex] of texCache.entries()){
+        if (!keep.has(k)) { try{ tex?.dispose?.(); }catch{} texCache.delete(k); }
+      }
+    }catch{}
+  }
+  function retainSW(urls){ try{ const abs=(urls||[]).map(u=>{ try{ return new URL(u, location.origin).href; }catch{ return u; } }); navigator.serviceWorker?.controller?.postMessage({ type:'retain', urls: abs }); }catch{} }
+  function neighborInfoFor(n, limit=2){
+    const out={ files:[], keys:[], urls:[] };
+    try{
+      const hs=Array.isArray(n?.hotspots)? n.hotspots : [];
+      for (const h of hs){
+        if (!h?.to || !nodesById.has(h.to)) continue;
+        const f = nodesById.get(h.to).file; if(!f || out.files.includes(f)) continue;
+        out.files.push(f); out.keys.push(BASE+"|"+f); out.urls.push(panoUrl(f));
+        if (out.files.length>=limit) break;
+      }
+    }catch{}
+    return out;
+  }
+  function retainOnly(keep){
+    try{
+      for (const [k, tex] of texCache.entries()){
+        if (!keep.has(k)) { try{ tex?.dispose?.(); }catch{} texCache.delete(k); }
+      }
+    }catch{}
+  }
+  function retainSW(urls){ try{ navigator.serviceWorker?.controller?.postMessage({ type:'retain', urls }); }catch{} }
+  function makeTexture(file){ const q=getQuality(); const tex = new Texture(panoUrl(file), scene, !q.mips, false, q.sampling); try{ tex.anisotropicFilteringLevel=q.aniso; }catch{} return tex; }
+  function getTexture(file){
+    const key=BASE+"|"+file;
+    if (texCache.has(key)) { touchLRU(key); return Promise.resolve(texCache.get(key)); }
+    if (inFlight.has(key)) return inFlight.get(key);
+    const tex=makeTexture(file);
+    const p=new Promise(res=>{ if (tex.isReady()){ texCache.set(key,tex); evictIfNeeded(key); return res(tex); } tex.onLoadObservable.addOnce(()=>{ texCache.set(key,tex); evictIfNeeded(key); res(tex); }); });
+    inFlight.set(key,p); p.finally(()=>inFlight.delete(key));
+    return p;
+  }
+  let lastMainFile = null;
+  async function showFile(file){
+    // DON'T show loading overlay - causes black screens
+    const tex = await getTexture(file);
+    // CORRECT: In 2D, CROP stereo (bottom half only for mono view)
+    mapFor2D(tex, /*stereo*/ isStereo(), FLIP_U);
+    domeMat.emissiveTexture = tex;
+    try{
+      const currentMainKey = BASE + "|" + file;
+      const keep = new Set([currentMainKey]);
+      const urls = [panoUrl(file)];
+      // retain previous pano
+      try{
+        if (typeof lastMainFile === 'string' && lastMainFile && lastMainFile !== file){
+          keep.add(BASE + "|" + lastMainFile);
+          urls.push(panoUrl(lastMainFile));
+        }
+      }catch{}
+      if (typeof mirrorTexKey === 'string' && mirrorTexKey) keep.add(mirrorTexKey);
+      const curNode = nodesById.get(currentNodeId);
+      const neigh = neighborInfoFor(curNode, PREFETCH_LIMIT);
+      neigh.files.forEach(f=>{ try{ getTexture(f).catch(()=>{}); }catch{} });
+      neigh.keys.forEach(k=>keep.add(k));
+      urls.push(...neigh.urls);
+      retainOnly(keep);
+      retainSW(urls);
+      try{ lastMainFile = file; }catch{}
+    }catch{}
+  }
+
+  // Release GPU memory when tab is hidden/backgrounded (mobile stability)
+  try{
+    document.addEventListener('visibilitychange', ()=>{ if (document.visibilityState !== 'visible') purgeTextures(); });
+    addEventListener('pagehide', ()=>purgeTextures());
+  }catch{}
+
+  try{
+    engine.onContextLostObservable.add(()=>{
+      console.warn("[AGENT] WebGL context lost - purging texture cache");
+      purgeTextures();
+    });
+    engine.onContextRestoredObservable.add(()=>{
+      console.info("[AGENT] WebGL context restored");
+      try{
+        const cur = nodesById.get(currentNodeId);
+        if (cur?.file) { getTexture(cur.file).catch(()=>{}); }
+      }catch{}
+    });
+  }catch{}
+
+  /* hotspots */
+  const hotspotRoot = new TransformNode("hotspots", scene); hotspotRoot.parent=dome; hotspotRoot.layerMask=0x1;
+  const hotspotRootXR = new TransformNode("hotspotsXR", scene); hotspotRootXR.layerMask=0x1;
+  function vecFromYawPitch(yawDeg,pitchDeg,R,flipY=false){ const y=rad(yawDeg), p=rad(pitchDeg||0), cp=Math.cos(p), sp=Math.sin(p); const ySign = flipY ? -1 : 1; return new Vector3(R*Math.cos(y)*cp, ySign*R*sp, -R*Math.sin(y)*cp); }
+  function clearHotspots(){ try{ hotspotRoot.getChildren().forEach(n=>n.dispose()); }catch{} try{ hotspotRootXR.getChildren().forEach(n=>n.dispose()); }catch{} }
+  function buildHotspotsInRoot(node, parentRoot, flipXLocal=false, isXR=false){
+    if (!node?.hotspots) return;
+    const R = (DOME_DIAMETER/2) * 0.98;
+    for (const h of node.hotspots){
+      const toId = h?.to; if (!toId || !nodesById.has(toId)) continue;
+      const root=new TransformNode("hs-"+(toId||""),scene); root.parent=parentRoot||hotspotRoot; root.layerMask=0x1; root.metadata={ hotspot:true, to:toId };
+      const ring=MeshBuilder.CreateDisc("hsRing",{radius:20,tessellation:48,sideOrientation:Mesh.DOUBLESIDE},scene);
+      const dot =MeshBuilder.CreateDisc("hsDot",{radius:10,tessellation:32,sideOrientation:Mesh.DOUBLESIDE},scene);
+      const rm=new StandardMaterial("hsRingMat",scene); rm.disableLighting=true; rm.emissiveColor=new Color3(1,1,1);
+      const dm=new StandardMaterial("hsDotMat",scene);  dm.disableLighting=true; dm.emissiveColor=new Color3(1,0.62,0.18);
+      ring.material=rm; dot.material=dm; ring.parent=root; dot.parent=root;
+      ring.billboardMode=Mesh.BILLBOARDMODE_ALL; dot.billboardMode=Mesh.BILLBOARDMODE_ALL;
+      ring.isPickable=false; dot.isPickable=false;
+      const pick=MeshBuilder.CreateSphere("hsPick",{diameter:120,segments:8},scene);
+      const pm=new StandardMaterial("hsPickMat",scene); pm.alpha=0.001; pm.disableLighting=true; pm.backFaceCulling=false;
+      pick.material=pm; pick.parent=root; pick.isPickable=true; pick.metadata={ hotspot:true, to:toId };
+      // FIX: When dome is flipped (FLIP_X), invert Y coordinate for hotspots
+      const v = vecFromYawPitch(h.yaw||0, h.pitch||0, R, flipXLocal);
+      root.position.copyFrom(v);
+      try{ root.lookAt(Vector3.Zero()); }catch{}
+    }
+  }
+  function buildHotspotsFor(node){ clearHotspots(); buildHotspotsInRoot(node, hotspotRoot, /*flipXLocal*/ FLIP_X, /*isXR*/ false); }
+
+  // 2D pick
+  scene.onPointerObservable.add(poi=>{
+    if (poi.type!==PointerEventTypes.POINTERUP) return;
+    const pick=scene.pick(scene.pointerX,scene.pointerY,m=>m?.metadata?.hotspot===true,false,cam);
+    const toId=pick?.pickedMesh?.metadata?.to;
+    if (toId && nodesById.has(toId)) goTo(toId, true);
+  });
+
+  /* minimap */
+  let mini=null;
+  function rebuildMinimap(){
+    document.querySelectorAll(".mini-wrap").forEach(el=>el.remove());
+    const padByFloor = new Map(data.floors.map(f=>[f.id,{x:0,y:0}]));
+    // Coordinate reference per floor: auto-detect from zones (preferred) or nodes
+    const coordByFloor = new Map(); // fid -> { w, h }
+    const originByFloor = new Map(); // fid -> { x, y }
+
+    // Zones support: build one marker per zone (centroid of polygon), fallback to nodes when zones absent
+    const hasZones = Array.isArray(data?.zones) && data.zones.length > 0;
+    const zonesByFloor = new Map(); // fid -> [{id,x,y}]
+    const zoneRep = new Map();      // zoneId -> representative nodeId
+    if (hasZones){
+      const centroid = (pts)=>{
+        if (!Array.isArray(pts) || pts.length === 0) return { x: 0, y: 0 };
+        let sx=0, sy=0; for (const p of pts){ sx += Number(p?.x)||0; sy += Number(p?.y)||0; }
+        return { x: sx/pts.length, y: sy/pts.length };
+      };
+      // Detect coordinate extents (max X/Y) per floor from zone polygons
+      const extents = new Map(); // fid -> { minX, minY, maxX, maxY }
+      for (const z of (data.zones||[])){
+        const c = centroid(z.points || []);
+        if (!zonesByFloor.has(z.floorId)) zonesByFloor.set(z.floorId, []);
+        zonesByFloor.get(z.floorId).push({ id: z.id, x: c.x, y: c.y, label: (typeof z.name==='string'? z.name : z.id) });
+        // track max extents
+        const arr = Array.isArray(z.points) ? z.points : [];
+        let e = extents.get(z.floorId) || { minX:Infinity, minY:Infinity, maxX:0, maxY:0 };
+        for (const p of arr){ const px = Number(p?.x)||0, py = Number(p?.y)||0; if (px>e.maxX) e.maxX=px; if (py>e.maxY) e.maxY=py; if (px<e.minX) e.minX=px; if (py<e.minY) e.minY=py; }
+        extents.set(z.floorId, e);
+        let rep = (typeof z.repNodeId === 'string' && nodesById.has(z.repNodeId)) ? z.repNodeId : null;
+        if (!rep){ const found = (data.nodes || []).find(n => n.zoneId === z.id); rep = found?.id || null; }
+        if (!rep){ rep = startNodeId || (nodesById.size? nodesById.values().next().value?.id : null); }
+        if (rep) zoneRep.set(z.id, rep);
+      }
+      // Write coord reference from detected extents (fallback to image size if too small)
+      for (const f of data.floors){ const e = extents.get(f.id); if (e){
+        const w = Math.max((Number(e.maxX)||0) - (isFinite(e.minX)?Number(e.minX):0), Number(f.width||0)||0);
+        const h = Math.max((Number(e.maxY)||0) - (isFinite(e.minY)?Number(e.minY):0), Number(f.height||0)||0);
+        if (isFinite(e.minX) && isFinite(e.minY)) originByFloor.set(f.id, { x: e.minX, y: e.minY });
+        if (w>0 && h>0) coordByFloor.set(f.id, { w, h });
+      } }
+    }
+
+    mini = buildMinimapDOM({
+      floors:data.floors, basePath:BASE, padByFloor, coordsMode: "auto", ui:"dropdown",
+      panelWidth:"clamp(160px, min(44vw, 42vh), 280px)", position:"top-right", paddingPx:12,
+      coordByFloor,
+      originByFloor,
+      onSelectNode:id=>{
+        if(!id) return;
+        if (hasZones && zoneRep.has(id)) { goTo(zoneRep.get(id), true); }
+        else { goTo(id, true); }
+      },
+      onFloorChange:fid=>{
+        if (hasZones){
+          const activeZone = nodesById.get(currentNodeId)?.zoneId || null;
+          const list = zonesByFloor.get(fid) || [];
+          mini.renderPoints(list, activeZone);
+        } else {
+          const list=data.nodes.filter(x=>x.floorId===fid);
+          mini.renderPoints(list,currentNodeId);
+        }
+      }
+    });
+    const cur = nodesById.get(currentNodeId) || nodesById.get(startNodeId) || (nodesById.size?nodesById.values().next().value:null);
+    if (cur){
+      mini.setActiveFloor(cur.floorId,true,true);
+      if (hasZones){
+        const list = zonesByFloor.get(cur.floorId) || [];
+        const active = nodesById.get(currentNodeId)?.zoneId || null;
+        mini.renderPoints(list, active);
+      } else {
+        mini.renderPoints(data.nodes.filter(x=>x.floorId===cur.floorId), currentNodeId);
+      }
+    }
+  }
+  rebuildMinimap();
+
+  /* move then swap */
+  function easeOutCubic(t){ return 1-Math.pow(1-t,3); }
+  function easeInOutSine(t){ return -(Math.cos(Math.PI*t)-1)/2; }
+  function forwardPushThenSwap(nextNode, dur=NAV_DUR_MS, push=NAV_PUSH_M){
+    const startPos=worldRoot.position.clone();
+    const yawW=cam.rotation.y;
+    const fwd=new Vector3(-Math.sin(yawW),0,-Math.cos(yawW)).scale(push);
+    const t0=performance.now();
+    const pre = getTexture(nextNode.file);
+    const useX = wantsCrossfade();
+    return new Promise(res=>{
+      const ob=scene.onBeforeRenderObservable.add(()=>{
+        const t=Math.min(1,(performance.now()-t0)/dur);
+        const e=easeOutCubic(t);
+        worldRoot.position.copyFrom(startPos.add(fwd.scale(e)));
+        // Subtle cinematic yaw drift
+        try{ const yawTarget = yawW + 0.05; cam.rotation.y = yawW + (yawTarget - yawW) * easeInOutSine(t); }catch{}
+        if(t>=1){ scene.onBeforeRenderObservable.remove(ob); res(); }
+      });
+    }).then(()=>pre).then(async (tex)=>{
+      if (useX && tex){

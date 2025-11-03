@@ -1,0 +1,40 @@
+    <div id="bottomBar" hidden>
+      <!-- Custom dropdown (live selector) -->
+      <div class="select" id="expSelectLiveWrap" data-open="false">
+        <button type="button" class="select-btn" id="expBtn">
+          <span id="expLabel">Select experience</span>
+          <svg width="14" height="10" viewBox="0 0 12 8" xmlns="http://www.w3.org/2000/svg"><path fill="#F3C400" d="M1 1l5 6 5-6"/></svg>
+        </button>
+        <ul class="select-list" id="expList" role="listbox"></ul>
+        <!-- Hidden native select used by JS -->
+        <select id="expSelectLive" hidden></select>
+      </div>
+
+<!-- Controls removed: dpad + zoom -->
+
+      <!-- Autoplay Tour Controls -->
+      <div id="tourWrap" aria-label="Autoplay" style="display:flex;gap:6px;margin-left:6px">
+        <button id="tourStart" class="btn-circle" title="Start tour" aria-label="Start tour">?</button>
+        <button id="tourPause" class="btn-circle" title="Pause/Resume tour" aria-label="Pause/Resume">?</button>
+        <button id="tourPrev"  class="btn-circle" title="Previous stop" aria-label="Previous">?</button>
+        <button id="tourNext"  class="btn-circle" title="Next stop" aria-label="Next">?</button>
+        <button id="tourStop"  class="btn-circle" title="Stop tour" aria-label="Stop">¦</button>
+      </div>
+      <button id="btnMini"   class="btn-circle" title="Hide/Show minimap" aria-label="Toggle minimap"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 6l6-3 6 3 6-3v14l-6 3-6-3-6 3V3z"/><path d="M9 3v14M15 6v14"/></svg></button>
+      <button id="btnMirror" class="btn-circle" title="Hide/Show mirror"  aria-label="Toggle mirror"><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="8" width="12" height="9" rx="2"/><rect x="9" y="4" width="12" height="9" rx="2"/></svg></button>
+      
+      <button id="btnFS"     class="btn-circle" title="Fullscreen"        aria-label="Fullscreen">?</button>
+    </div>
+
+    <!-- Join Gate (heading removed) -->
+    <div id="roleGate">
+      <div class="gate-card">
+        <div class="gate-row">
+          <input id="roomInput" placeholder="Enter a room number" />
+          <!-- Custom dropdown in the gate (yellow highlight) -->
+          <div class="select drop-down" id="gateExpWrap" data-open="false" style="flex:1">
+            <button type="button" class="select-btn" id="gateExpBtn">
+              <span id="gateExpLabel">Select experience</span>
+              <svg width="14" height="10" viewBox="0 0 12 8" xmlns="http://www.w3.org/2000/svg"><path fill="#F3C400" d="M1 1l5 6 5-6"/></svg>
+            </button>
+            <ul class="select-list" id="gateExpList" role="listbox"></ul>

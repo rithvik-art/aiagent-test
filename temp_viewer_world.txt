@@ -1,0 +1,80 @@
+    const f = floorCenters.get(n.floorId) || { cx: 0, cy: 0, ppm: 100 };
+    const idx = floorIndex.get(n.floorId) ?? 0;
+    return new Vector3((n.x - f.cx) / f.ppm, idx * FLOOR_HEIGHT_M, (n.y - f.cy) / f.ppm);
+  };
+  /* Dome */
+  const worldRoot = new TransformNode("worldRoot", scene);
+  const dome = MeshBuilder.CreateSphere("dome", { diameter: DOME_DIAMETER, segments: 64, sideOrientation: Mesh.BACKSIDE }, scene);
+  dome.parent = worldRoot;
+  if (FLIP_X) dome.rotation.x = Math.PI;
+
+  const domeMat = new StandardMaterial("panoMat", scene);
+  domeMat.disableLighting = true;
+  domeMat.backFaceCulling = false;
+  domeMat.transparencyMode = Material.MATERIAL_ALPHABLEND;
+  dome.material = domeMat;
+
+  // Drag-to-rotate + pinch/wheel zoom for Viewer (2D) — immediate (no drift)
+  let dragging=false, lastX=0, lastY=0;
+  let yawV=0, pitchV=0;
+  const yawSpeed=0.005, pitchSpeed=0.003, pitchClamp=Math.PI*0.39;
+  function applyCam(){
+    const px = Math.max(-pitchClamp, Math.min(pitchClamp, pitchV));
+    cam.rotation.y = yawV;
+    cam.rotation.x = px;
+  }
+  const canvas2 = document.getElementById('renderCanvas');
+  if (canvas2){
+    canvas2.style.cursor='grab';
+    const MIN_FOV=0.45, MAX_FOV=1.7; const clampF=(v)=>Math.max(MIN_FOV, Math.min(MAX_FOV, v));
+    const touches=new Map(); let pinch=false, pinRef=0, pinBase=cam.fov; const dist=(a,b)=>Math.hypot(a.x-b.x,a.y-b.y)||1;
+    canvas2.addEventListener('pointerdown', (e)=>{
+      touches.set(e.pointerId, {x:e.clientX, y:e.clientY});
+      if (touches.size===2){ const it=[...touches.values()]; pinRef=dist(it[0],it[1]); pinBase=cam.fov; pinch=true; dragging=false; canvas2.style.cursor='grab'; }
+      else if (touches.size===1){ dragging=true; lastX=e.clientX; lastY=e.clientY; try{ canvas2.setPointerCapture(e.pointerId); }catch{} canvas2.style.cursor='grabbing'; }
+    }, { passive:false });
+    canvas2.addEventListener('pointermove', (e)=>{
+      const p=touches.get(e.pointerId); if (p){ p.x=e.clientX; p.y=e.clientY; }
+      if (pinch && touches.size>=2){ const it=[...touches.values()]; const cur=dist(it[0],it[1]); const scale=Math.max(0.25,Math.min(4,cur/pinRef)); cam.fov = clampF(pinBase*scale); return; }
+      if(!dragging) return; const dx=e.clientX-lastX, dy=e.clientY-lastY; lastX=e.clientX; lastY=e.clientY; yawV -= dx*yawSpeed; pitchV -= dy*pitchSpeed; applyCam();
+    }, { passive:true });
+    function endPtr(){ dragging=false; pinch=false; canvas2.style.cursor='grab'; }
+    canvas2.addEventListener('pointerup', (e)=>{ touches.delete(e.pointerId); endPtr(); }, { passive:true });
+    canvas2.addEventListener('pointerleave', (e)=>{ touches.delete(e.pointerId); endPtr(); }, { passive:true });
+    canvas2.addEventListener('pointercancel', (e)=>{ touches.delete(e.pointerId); endPtr(); }, { passive:true });
+    canvas2.addEventListener('wheel', (e)=>{ e.preventDefault(); const step=Math.max(-0.2,Math.min(0.2,(e.deltaY||0)*0.0012)); cam.fov = clampF(cam.fov + step); }, { passive:false });
+  }
+
+  // second dome for crossfade in 2D
+  const dome2 = MeshBuilder.CreateSphere("dome2", { diameter: DOME_DIAMETER, segments: 64, sideOrientation: Mesh.BACKSIDE }, scene);
+  dome2.parent = worldRoot; if (FLIP_X) dome2.rotation.x = Math.PI;
+  const domeMat2 = new StandardMaterial("panoMatB", scene);
+  domeMat2.disableLighting = true; domeMat2.backFaceCulling = false; domeMat2.transparencyMode = Material.MATERIAL_ALPHABLEND;
+  domeMat.alpha = 1.0; domeMat2.alpha = 0.0; dome2.material = domeMat2;
+  let activeMat = 0; const mats=[domeMat,domeMat2]; const domes=[dome,dome2];
+  async function crossfadeToTexture(tex, durMs=200){
+    mapFor2D(tex, isStereo());
+    // On iOS, avoid double-buffer crossfade to reduce peak memory
+    if (IS_IOS) {
+      try { domeMat.emissiveTexture = tex; domeMat.alpha = 1.0; } catch {}
+      try { dome.setEnabled(true); dome2.setEnabled(false); } catch {}
+      activeMat = 0;
+      return;
+    }
+    const from=mats[activeMat]; const to=mats[1-activeMat];
+    to.emissiveTexture = tex; to.alpha = 0.0; domes[0].setEnabled(true); domes[1].setEnabled(true);
+    let t0=performance.now();
+    await new Promise(res=>{ const obs=scene.onBeforeRenderObservable.add(()=>{ const t=Math.min(1,(performance.now()-t0)/durMs); to.alpha=t; from.alpha=1-t; if(t>=1){ scene.onBeforeRenderObservable.remove(obs); res(); }}); });
+    activeMat = 1-activeMat;
+  }
+
+  /* Texture cache & mapping */
+  // LRU texture cache to prevent unbounded GPU memory growth
+  const texCache = new Map();
+  const inFlight = new Map();
+  const TEX_LIMIT = (()=>{ try{ const ua=(navigator.userAgent||'').toLowerCase(); if(/iphone|ipad|ipod|ios/.test(ua)) return 2; if(/android/.test(ua)) return 8; return 16; }catch{ return 16; } })();
+  function touchLRU(key){ if(!texCache.has(key)) return; const v=texCache.get(key); texCache.delete(key); texCache.set(key,v); }
+  function evictIfNeeded(curKey){
+    try{
+      while (texCache.size > TEX_LIMIT){
+        const firstKey = texCache.keys().next().value;

@@ -1,0 +1,50 @@
+      rebuildFloorMaps(); const node = nodesById.get(startNodeId) || (nodesById.size?nodesById.values().next().value:null); if (!node) return;
+      currentNodeId = node.id; await showFile(node.file); worldRoot.position.copyFrom(nodeWorldPos(node)); buildHotspotsFor(node); await setMirrorNode(node.id); rebuildMinimap(); updateMirrorLayout(); sendSync(node.id);
+    },
+    setMirrorPitchSign: (s)=>{ const n = Number(s); if (n===1 || n===-1){ MIRROR_PITCH_SIGN = n; } },
+    toggleMirrorPitchSign: ()=>{ MIRROR_PITCH_SIGN *= -1; },
+    setMirrorYawSign: (s)=>{ const n = Number(s); if (n===1 || n===-1){ MIRROR_YAW_SIGN = n; } },
+    toggleMirrorYawSign: ()=>{ MIRROR_YAW_SIGN *= -1; },
+    // Expose minimal navigation and data for AI assistant
+    getContext: ()=>({
+      exp: expName(),
+      floors: data?.floors||[],
+      zones: data?.zones||[],
+      nodes: data?.nodes?.map(n=>({ id:n.id, floorId:n.floorId, zoneId:n.zoneId }))||[],
+      currentNodeId
+    }),
+    goToNode: (id)=>goTo(id,true),
+    goToZoneByName: (name)=>{
+      if (!name) return Promise.resolve();
+      const list=(data?.zones||[]).map(z=>({ id:z.id, name:String(z.name||z.id).toLowerCase().trim() }));
+      const q=String(name).toLowerCase().trim();
+      const hit = list.find(z=>z.name===q) || list.find(z=>z.name.includes(q));
+      if (!hit) return Promise.resolve();
+      // Choose rep node or first node within that zone on current floor, else any
+      const cand = (data?.nodes||[]).find(n=>n.zoneId===hit.id && n.floorId===nodesById.get(currentNodeId)?.floorId) ||
+                   (data?.nodes||[]).find(n=>n.zoneId===hit.id) || null;
+      if (cand) return goTo(cand.id,true);
+      return Promise.resolve();
+    },
+    goToNextInZone: ()=>{
+      const cur = nodesById.get(currentNodeId); if(!cur||!cur.zoneId) return Promise.resolve();
+      const list=(data?.nodes||[]).filter(n=>n.zoneId===cur.zoneId);
+      if (!list.length) return Promise.resolve();
+      const i = Math.max(0, list.findIndex(n=>n.id===cur.id));
+      const next = list[(i+1)%list.length];
+      return goTo(next.id,true);
+    },
+    goToPrevInZone: ()=>{
+      const cur = nodesById.get(currentNodeId); if(!cur||!cur.zoneId) return Promise.resolve();
+      const list=(data?.nodes||[]).filter(n=>n.zoneId===cur.zoneId);
+      if (!list.length) return Promise.resolve();
+      const i = Math.max(0, list.findIndex(n=>n.id===cur.id));
+      const prev = list[(i-1+list.length)%list.length];
+      return goTo(prev.id,true);
+    }
+  };
+
+  engine.runRenderLoop(()=>scene.render());
+  window.addEventListener("resize", ()=>{ engine.resize(); updateMirrorLayout(); });
+  return api;
+}
